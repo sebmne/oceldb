@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "oceldb"
-version = "0.1.0"
+version = "0.2.0"
 description = "Filter and query OCEL 2.0 event logs on disk via DuckDB"
 authors = [{name = "Sebastian Menne", email = "sebastian.menne@rwth-aachen.de"}]
 license = {text = "MIT"}

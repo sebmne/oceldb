@@ -1,118 +1,16 @@
-"""Core Ocel class for reading, querying, and exporting OCEL 2.0 event logs."""
+"""Core Ocel class — the main entry point for oceldb."""
 
 from __future__ import annotations
 
 import tempfile
-from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
 import duckdb
 
-from oceldb._util import query_type_map, sql_path
-from oceldb.expr import Domain, Expr
-
-
-@dataclass
-class Summary:
-    """Lightweight summary of an OCEL 2.0 log.
-
-    All fields are computed via scalar DuckDB queries — no event or
-    object data is materialized into Python memory.
-    """
-
-    num_events: int
-    num_objects: int
-    num_event_types: int
-    num_object_types: int
-    event_types: list[str]
-    object_types: list[str]
-    num_e2o_relations: int
-    num_o2o_relations: int
-
-
-class ViewBuilder:
-    """Accumulates filter expressions and creates a filtered :class:`Ocel`.
-
-    Obtain an instance via :meth:`Ocel.view`, chain ``.filter()`` calls,
-    then call ``.create()``::
-
-        filtered = (
-            ocel.view()
-            .filter(event.type == "Create Order")
-            .filter(event.time > "2022-01-01")
-            .create()
-        )
-
-    Each ``.filter()`` call adds a SQL WHERE condition.  Filters referencing
-    event attributes and object attributes are classified automatically —
-    a single expression must not mix both domains.
-    """
-
-    def __init__(self, ocel: Ocel) -> None:
-        self._ocel = ocel
-        self._filters: list[Expr] = []
-
-    def filter(self, expr: Expr) -> ViewBuilder:
-        """Append a filter expression.  Returns ``self`` for chaining."""
-        self._filters.append(expr)
-        return self
-
-    def create(self) -> Ocel:
-        """Materialize the accumulated filters into a new view-backed :class:`Ocel`.
-
-        The returned instance shares the DuckDB connection with its parent
-        and is backed by lazy views — no data is copied until you call
-        :meth:`Ocel.to_sqlite` or :meth:`Ocel.to_pm4py`.
-        """
-        from oceldb.writer import create_views
-
-        event_filters, object_filters = self._classify_by_domain()
-        target = create_views(
-            self._ocel._con,
-            self._ocel._schema_prefix,
-            event_filters,
-            object_filters,
-        )
-        return Ocel(
-            con=self._ocel._con,
-            path=self._ocel._path,
-            schema_prefix=target,
-            owns_connection=False,
-        )
-
-    def _classify_by_domain(self) -> tuple[list[Expr], list[Expr]]:
-        """Split filters into event-domain and object-domain lists.
-
-        Raises :class:`ValueError` if a single expression references
-        columns from both domains.
-        """
-        event_filters: list[Expr] = []
-        object_filters: list[Expr] = []
-
-        for f in self._filters:
-            cols = f.columns()
-            domains = {c.domain for c in cols}
-
-            if not domains:
-                raise ValueError(
-                    "Filter expression must reference at least one "
-                    "event or object column."
-                )
-
-            if len(domains) > 1:
-                raise ValueError(
-                    "A single filter expression cannot mix event and object columns. "
-                    "Use separate .filter() calls."
-                )
-
-            domain = next(iter(domains))
-            if domain == Domain.EVENT:
-                event_filters.append(f)
-            else:
-                object_filters.append(f)
-
-        return event_filters, object_filters
+from oceldb.types import Domain, Summary
+from oceldb.utils import escape_string
+from oceldb.view import ViewBuilder
 
 
 class Ocel:
@@ -135,6 +33,19 @@ class Ocel:
         schema_prefix: str,
         owns_connection: bool = True,
     ) -> None:
+        """Initialize an Ocel instance.
+
+        This is an internal constructor. Use :meth:`read` to open a file,
+        or :meth:`view` / :meth:`ViewBuilder.create` to create filtered views.
+
+        Args:
+            con: An open DuckDB connection with the OCEL schema attached.
+            path: Path to the source SQLite file, or ``None`` for in-memory views.
+            schema_prefix: Fully qualified schema prefix (e.g. ``"ocel_db.main"``
+                or ``"memory.oceldb_view_abc12345"``).
+            owns_connection: If ``True``, :meth:`close` shuts down the connection.
+                If ``False``, it only drops the view schema.
+        """
         self._con = con
         self._path = path
         self._schema_prefix = schema_prefix
@@ -144,29 +55,56 @@ class Ocel:
     def read(cls, path: str | Path) -> Ocel:
         """Open an OCEL 2.0 SQLite file for reading.
 
-        The file is attached read-only to a new in-memory DuckDB connection.
+        The file is attached read-only to a fresh in-memory DuckDB connection.
+        Use as a context manager to ensure the connection is cleaned up::
+
+            with Ocel.read("order_log.sqlite") as ocel:
+                print(ocel.summary())
+
+        Args:
+            path: Path to an OCEL 2.0 SQLite file.
+
+        Returns:
+            A file-backed :class:`Ocel` instance that owns its connection.
+
+        Raises:
+            FileNotFoundError: If *path* does not exist.
         """
         path = Path(path)
         if not path.exists():
             raise FileNotFoundError(f"OCEL file not found: {path}")
 
         con = duckdb.connect()
-        con.execute(f"ATTACH '{sql_path(path)}' AS ocel_db (TYPE SQLITE, READ_ONLY)")
+        con.execute(
+            f"ATTACH '{escape_string(str(path))}' AS ocel_db (TYPE SQLITE, READ_ONLY)"
+        )
         con.execute("USE ocel_db")
 
         return cls(con=con, path=path, schema_prefix="ocel_db.main")
 
     def sql(self, query: str) -> duckdb.DuckDBPyRelation:
-        """Execute an arbitrary SQL query against this log's tables."""
+        """Execute a SQL query against this log's tables.
+
+        The connection's active schema is set to this instance's schema before
+        execution, so unqualified table names (``event``, ``object``, etc.)
+        resolve correctly even for filtered views.
+
+        Args:
+            query: Any valid DuckDB SQL statement.
+
+        Returns:
+            A :class:`duckdb.DuckDBPyRelation` with the query results.
+        """
         self._con.execute(f"USE {self._schema_prefix}")
         return self._con.sql(query)
 
     def view(self) -> ViewBuilder:
         """Start building a filtered view of this log.
 
-        Returns a :class:`ViewBuilder` that accepts chained ``.filter()``
-        calls.  Call ``.create()`` on the builder to obtain a new, filtered
-        :class:`Ocel` instance backed by lazy DuckDB views.
+        Returns a :class:`~oceldb.view.ViewBuilder`.  Chain ``.where()``
+        calls to add conditions, then call ``.create()`` to materialize::
+
+            filtered = ocel.view().where(event.type == "X").create()
         """
         return ViewBuilder(self)
 
@@ -197,68 +135,70 @@ class Ocel:
         return self.sql("SELECT * FROM object_object")
 
     def attributes(self, entity: Domain, ocel_type: str) -> list[str]:
-        """Return per-type attribute names for an event or object type.
+        """Return the attribute column names for a specific event or object type.
 
         Args:
             entity: :attr:`Domain.EVENT` or :attr:`Domain.OBJECT`.
             ocel_type: The OCEL type name (e.g. ``"Create Order"``).
 
         Returns:
-            Column names excluding ``ocel_id`` and ``ocel_time``.
+            Column names of the per-type table, including ``ocel_id``.
+
+        Raises:
+            ValueError: If *ocel_type* is not present in the log.
         """
-        type_map = query_type_map(self._con, self._schema_prefix, entity.value)
+        rows = self.sql(
+            f"SELECT ocel_type, ocel_type_map FROM {entity.value}_map_type"
+        ).fetchall()
+        type_map = {row[0]: f"{entity.value}_{row[1]}" for row in rows}
         table = type_map.get(ocel_type)
         if table is None:
             raise ValueError(
-                f"Unknown {entity.value} type: {ocel_type!r}. Known types: {list(type_map)}"
+                f"Unknown {entity.value} type: {ocel_type!r}. "
+                f"Known types: {list(type_map)}"
             )
-        self._con.execute(f"USE {self._schema_prefix}")
-        cols = self._con.sql(f'DESCRIBE "{table}"').fetchall()
-        return [row[0] for row in cols if row[0] not in ("ocel_id", "ocel_time")]
+        cols = self.sql(f'DESCRIBE "{table}"').fetchall()
+        return [row[0] for row in cols]
 
     def summary(self) -> Summary:
-        """Compute a lightweight summary of this log.
+        """Compute a lightweight summary of this log."""
+        et = [r[0] for r in self.event_types().fetchall()]
+        ot = [r[0] for r in self.object_types().fetchall()]
 
-        All counts are evaluated lazily via DuckDB — no data is loaded
-        into Python beyond the scalar results.
-        """
-
-        def count(table: str) -> int:
-            return self.sql(f"SELECT COUNT(*) FROM {table}").fetchone()[0]
-
-        def distinct_types(table: str) -> list[str]:
-            rows = self.sql(
-                f"SELECT DISTINCT ocel_type FROM {table} ORDER BY ocel_type"
-            ).fetchall()
-            return [r[0] for r in rows]
-
-        et = distinct_types("event")
-        ot = distinct_types("object")
         return Summary(
-            num_events=count("event"),
-            num_objects=count("object"),
+            num_events=self._count("event"),
+            num_objects=self._count("object"),
             num_event_types=len(et),
             num_object_types=len(ot),
             event_types=et,
             object_types=ot,
-            num_e2o_relations=count("event_object"),
-            num_o2o_relations=count("object_object"),
+            num_e2o_relations=self._count("event_object"),
+            num_o2o_relations=self._count("object_object"),
         )
+
+    def _count(self, table: str) -> int:
+        count = self.sql(f"SELECT COUNT(*) FROM {table}").fetchone()
+        if count is None:
+            raise ValueError(f"Unknown table: {table!r}.")
+        return count[0]
 
     # -- Export ----------------------------------------------------------------
 
     def to_sqlite(self, path: str | Path) -> None:
-        """Materialize this log (including any active filters) to a SQLite file.
+        """Export this log to a new OCEL 2.0 SQLite file.
 
-        The output conforms to the OCEL 2.0 SQLite standard and can be read
-        by pm4py or any other OCEL 2.0 consumer.
+        Writes all tables (core, relationship, map, and per-type) visible
+        through the current schema — so filtered views export only the
+        surviving subset.
+
+        Args:
+            path: Destination file path. Any existing file is overwritten.
         """
         path = Path(path)
         if path.exists():
             path.unlink()
 
-        self._con.execute(f"USE {self._schema_prefix}")
-        self._con.execute(f"ATTACH '{sql_path(path)}' AS _ocel_export (TYPE SQLITE)")
+        self.sql(f"ATTACH '{escape_string(str(path))}' AS _ocel_export (TYPE SQLITE)")
         try:
             for table in [
                 "event",
@@ -268,29 +208,32 @@ class Ocel:
                 "event_map_type",
                 "object_map_type",
             ]:
-                self._con.execute(
-                    f"CREATE TABLE _ocel_export.{table} AS SELECT * FROM {table}"
-                )
-            for entity in ("event", "object"):
-                for table in query_type_map(
-                    self._con, self._schema_prefix, entity
-                ).values():
-                    self._con.execute(
-                        f'CREATE TABLE _ocel_export."{table}" AS '
-                        f'SELECT * FROM "{table}"'
+                self.sql(f"CREATE TABLE _ocel_export.{table} AS SELECT * FROM {table}")
+
+            for entity in [Domain.EVENT.value, Domain.OBJECT.value]:
+                tables = self.sql(
+                    f"SELECT DISTINCT ocel_type_map FROM {entity}_map_type"
+                ).fetchall()
+                for (table,) in tables:
+                    self.sql(
+                        f'CREATE TABLE _ocel_export."{entity}_{table}" AS '
+                        f'SELECT * FROM "{entity}_{table}"'
                     )
         finally:
-            self._con.execute("DETACH _ocel_export")
+            self.sql("DETACH _ocel_export")
 
     def to_pm4py(self) -> Any:
         """Export this log as a ``pm4py.OCEL`` object.
 
-        Requires the optional ``pm4py`` dependency::
+        For file-backed instances, reads the original file directly. For
+        view-backed instances, materializes to a temporary SQLite file first.
 
-            pip install oceldb[pm4py]
+        Returns:
+            A ``pm4py.OCEL`` object.
 
-        File-backed instances read directly from disk.  View-backed instances
-        materialize to a temporary SQLite file first.
+        Raises:
+            ImportError: If ``pm4py`` is not installed. Install it with
+                ``pip install oceldb[pm4py]``.
         """
         try:
             import pm4py
@@ -311,10 +254,11 @@ class Ocel:
             tmp_path.unlink()
 
     def close(self) -> None:
-        """Release resources.
+        """Release resources held by this instance.
 
-        View-backed instances drop their DuckDB schema.  File-backed
-        instances close the underlying connection.
+        For file-backed instances (``owns_connection=True``), closes the
+        DuckDB connection. For view-backed instances, drops the in-memory
+        schema that holds the filtered views.
         """
         if not self._owns_connection:
             self._con.execute(f"DROP SCHEMA IF EXISTS {self._schema_prefix} CASCADE")

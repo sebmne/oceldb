@@ -4,19 +4,21 @@ Usage::
 
     from oceldb import Ocel, event, obj
 
-    ocel = Ocel.read("log.sqlite")
-    filtered = (
-        ocel.view()
-        .filter(event.type == "Create Order")
-        .filter(event.time > "2022-01-01")
-        .filter(obj.type == "order")
-        .create()
-    )
-    filtered.to_sqlite("filtered.sqlite")
-    pm4py_ocel = filtered.to_pm4py()
+    with Ocel.read("log.sqlite") as ocel:
+        filtered = (ocel.view()
+            .where(event.type == "Create Order")
+            .where(event.time > "2022-01-01")
+            .create())
+        filtered.to_sqlite("filtered.sqlite")
 """
 
-from .expr import Domain, event, obj
-from .ocel import Ocel, Summary
+from oceldb.expr import event, obj
+from oceldb.ocel import Ocel
+from oceldb.view import ViewBuilder
 
-__all__ = ["Domain", "Ocel", "Summary", "event", "obj"]
+__all__ = [
+    "Ocel",
+    "ViewBuilder",
+    "event",
+    "obj",
+]

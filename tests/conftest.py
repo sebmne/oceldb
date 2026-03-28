@@ -17,10 +17,17 @@ def ocel_db(tmp_path: Path) -> Path:
                      "Pay Order"    (attributes: payment_method TEXT)
         Object types: "order"    (attributes: status TEXT),
                       "customer" (attributes: name TEXT)
-        Events: e1 (Create Order), e2 (Create Order), e3 (Pay Order)
+        Events: e1 (Create Order, 10:00), e2 (Create Order, 11:00),
+                e3 (Pay Order, 12:00), e4 (Pay Order, 13:00),
+                e5 (Create Order, 14:00)
         Objects: o1 (order), o2 (order), o3 (customer)
-        E2O relations: e1→o1, e1→o3, e2→o2, e3→o1
+        E2O relations: e1→o1, e1→o3, e2→o2, e3→o1, e4→o2, e5→o1
         O2O relations: o1→o3, o2→o3
+
+    Timelines per object:
+        o1: e1 (Create Order 10:00) → e3 (Pay Order 12:00) → e5 (Create Order 14:00)
+        o2: e2 (Create Order 11:00) → e4 (Pay Order 13:00)
+        o3: e1 (Create Order 10:00)
     """
     db_path = tmp_path / "test.sqlite"
     con = sqlite3.connect(str(db_path))
@@ -30,7 +37,13 @@ def ocel_db(tmp_path: Path) -> Path:
     cur.execute("CREATE TABLE event (ocel_id TEXT PRIMARY KEY, ocel_type TEXT)")
     cur.executemany(
         "INSERT INTO event VALUES (?, ?)",
-        [("e1", "Create Order"), ("e2", "Create Order"), ("e3", "Pay Order")],
+        [
+            ("e1", "Create Order"),
+            ("e2", "Create Order"),
+            ("e3", "Pay Order"),
+            ("e4", "Pay Order"),
+            ("e5", "Create Order"),
+        ],
     )
 
     cur.execute("CREATE TABLE object (ocel_id TEXT PRIMARY KEY, ocel_type TEXT)")
@@ -52,6 +65,8 @@ def ocel_db(tmp_path: Path) -> Path:
             ("e1", "o3", "customer"),
             ("e2", "o2", "order"),
             ("e3", "o1", "order"),
+            ("e4", "o2", "order"),
+            ("e5", "o1", "order"),
         ],
     )
 
@@ -86,7 +101,11 @@ def ocel_db(tmp_path: Path) -> Path:
     )
     cur.executemany(
         "INSERT INTO event_CreateOrder VALUES (?, ?, ?)",
-        [("e1", "2022-01-01T10:00:00", 100.0), ("e2", "2022-01-02T11:00:00", 250.0)],
+        [
+            ("e1", "2022-01-01T10:00:00", 100.0),
+            ("e2", "2022-01-01T11:00:00", 250.0),
+            ("e5", "2022-01-01T14:00:00", 300.0),
+        ],
     )
 
     cur.execute(
@@ -94,9 +113,12 @@ def ocel_db(tmp_path: Path) -> Path:
         "  ocel_id TEXT PRIMARY KEY, ocel_time TEXT, payment_method TEXT"
         ")"
     )
-    cur.execute(
+    cur.executemany(
         "INSERT INTO event_PayOrder VALUES (?, ?, ?)",
-        ("e3", "2022-01-03T12:00:00", "credit_card"),
+        [
+            ("e3", "2022-01-01T12:00:00", "credit_card"),
+            ("e4", "2022-01-01T13:00:00", "debit_card"),
+        ],
     )
 
     # Per-type object tables
