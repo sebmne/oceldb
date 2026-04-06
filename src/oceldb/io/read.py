@@ -7,7 +7,8 @@ from pathlib import Path
 
 import duckdb
 
-from oceldb.ocel import OCEL, OCELMetadata
+from oceldb.core.metadata import OCELMetadata
+from oceldb.core.ocel import OCEL
 
 
 def read_ocel(path: str | Path) -> OCEL:
