@@ -1,13 +1,14 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from typing import Optional
 
 from oceldb.expressions.base import Expr
 from oceldb.expressions.context import Context
 from oceldb.expressions.scopes import Scope
 
 
-def has_event(event_type: str | None = None) -> "HasEvent":
+def has_event(event_type: Optional[str] = None) -> "HasEvent":
     """
     Build an event scope for events attached to the current root object.
 
@@ -28,9 +29,9 @@ class HasEvent(Scope):
     If `event_type` is given, the scope is restricted to that event type.
     """
 
-    event_type: str | None = None
+    event_type: Optional[str] = None
 
-    def _with_filters(self, filters: tuple[Expr, ...]) -> "HasEvent":
+    def _clone_with_filters(self, filters: tuple[Expr, ...]) -> "HasEvent":
         return HasEvent(event_type=self.event_type, filters=filters)
 
     def _scope_sql(self, ctx: Context) -> str:

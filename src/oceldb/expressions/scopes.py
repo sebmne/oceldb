@@ -30,7 +30,7 @@ class Scope(ABC):
         """
         Refine this scope with an additional predicate.
         """
-        return self._with_filters(self.filters + (expr,))
+        return self._clone_with_filters(self.filters + (expr,))
 
     def exists(self) -> ScopeExistsExpr:
         """
@@ -59,7 +59,7 @@ class Scope(ABC):
         return ScopeAllExpr(self, expr)
 
     @abstractmethod
-    def _with_filters(self, filters: tuple[Expr, ...]) -> Self:
+    def _clone_with_filters(self, filters: tuple[Expr, ...]) -> Self:
         """
         Return a copy of this scope with the given filters.
         """

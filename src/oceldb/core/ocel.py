@@ -7,6 +7,7 @@ from pathlib import Path
 import duckdb
 
 from oceldb.core.metadata import OCELMetadata
+from oceldb.inspection.inspector import OCELInspector
 
 
 class OCEL:
@@ -20,8 +21,6 @@ class OCEL:
         - object
         - event_object
         - object_object
-        - event_type
-        - object_type
 
     Do not instantiate this class directly. Use `oceldb.io.read_ocel()` instead.
     """
@@ -32,11 +31,13 @@ class OCEL:
         con: duckdb.DuckDBPyConnection,
         metadata: OCELMetadata,
         schema: str,
+        owns_connection: bool = True,
     ) -> None:
         self._path = path
         self._con = con
         self._meta = metadata
         self._schema = schema
+        self._owns_connection = owns_connection
 
     # ----- Public Properties -----
 
@@ -55,65 +56,15 @@ class OCEL:
         """The DuckDB schema backing this OCEL instance."""
         return self._schema
 
-    # ----- Lazy Inspection Methods -----
+    # ----- Inspection -----
 
     @property
-    def event_types(self) -> list[str]:
+    def inspect(self) -> OCELInspector:
         """
-        Lazy inspection of event types declared in the log.
+        Access the OCEL inspection and descriptive summary interface.
+        """
 
-        This reads from the dedicated `event_type` table, not from distinct
-        types present in `event`, so declared-but-empty types are preserved.
-        """
-        query = f"SELECT DISTINCT ocel_type FROM {self.schema}.event_type"
-        return sorted(r[0] for r in self.sql(query).fetchall())
-
-    @property
-    def object_types(self) -> list[str]:
-        """
-        Lazy inspection of object types declared in the log.
-
-        This reads from the dedicated `object_type` table, not from distinct
-        types present in `object`, so declared-but-empty types are preserved.
-        """
-        query = f"SELECT DISTINCT ocel_type FROM {self.schema}.object_type"
-        return sorted(r[0] for r in self.sql(query).fetchall())
-
-    def get_event_attributes(self, event_type: str) -> list[str]:
-        """
-        Dynamically extract the attributes currently attached to a specific event type.
-
-        Args:
-            event_type: The exact string name of the event type.
-
-        Returns:
-            A sorted list of custom attribute keys.
-        """
-        escaped = event_type.replace("'", "''")
-        query = f"""
-            SELECT DISTINCT UNNEST(json_keys(attributes::JSON))
-            FROM {self.schema}.event
-            WHERE ocel_type = '{escaped}' AND attributes IS NOT NULL
-        """
-        return sorted(r[0] for r in self.sql(query).fetchall())
-
-    def get_object_attributes(self, object_type: str) -> list[str]:
-        """
-        Dynamically extract the attributes currently attached to a specific object type.
-
-        Args:
-            object_type: The exact string name of the object type.
-
-        Returns:
-            A sorted list of custom attribute keys.
-        """
-        escaped = object_type.replace("'", "''")
-        query = f"""
-            SELECT DISTINCT UNNEST(json_keys(attributes::JSON))
-            FROM {self.schema}.object
-            WHERE ocel_type = '{escaped}' AND attributes IS NOT NULL
-        """
-        return sorted(r[0] for r in self.sql(query).fetchall())
+        return OCELInspector(self)
 
     # ----- Safe Data Access API -----
 
@@ -168,7 +119,10 @@ class OCEL:
 
     def close(self) -> None:
         """Safely close the DuckDB connection."""
-        self._con.close()
+        if self._owns_connection:
+            self._con.close()
+        else:
+            self._con.execute(f"DROP SCHEMA {self._schema} CASCADE")
 
     def __enter__(self) -> OCEL:
         return self

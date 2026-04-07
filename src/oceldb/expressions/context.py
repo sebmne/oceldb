@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, replace
-from typing import Literal
+from typing import Literal, Optional
 
 ScopeKind = Literal["object", "event"]
 
@@ -36,7 +36,7 @@ class Context:
         self,
         prefix: str,
         *,
-        kind: ScopeKind | None = None,
+        kind: Optional[ScopeKind] = None,
     ) -> "Context":
         """
         Derive a child compilation context with a fresh SQL alias.

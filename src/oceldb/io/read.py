@@ -20,9 +20,14 @@ def read_ocel(path: str | Path) -> OCEL:
         - object.parquet
         - event_object.parquet
         - object_object.parquet
-        - event_type.parquet
-        - object_type.parquet
         - metadata.json
+
+    The loaded OCEL is exposed through a fresh DuckDB schema containing the
+    logical tables:
+        - event
+        - object
+        - event_object
+        - object_object
     """
     path = Path(path).expanduser().resolve()
 
@@ -37,8 +42,6 @@ def read_ocel(path: str | Path) -> OCEL:
         "object.parquet",
         "event_object.parquet",
         "object_object.parquet",
-        "event_type.parquet",
-        "object_type.parquet",
         "metadata.json",
     ]
 
@@ -80,34 +83,29 @@ def read_ocel(path: str | Path) -> OCEL:
 
     con.execute(f"CREATE SCHEMA {schema}")
 
+    event_path = str(path / "event.parquet").replace("'", "''")
+    object_path = str(path / "object.parquet").replace("'", "''")
+    event_object_path = str(path / "event_object.parquet").replace("'", "''")
+    object_object_path = str(path / "object_object.parquet").replace("'", "''")
+
     con.execute(f"""
         CREATE VIEW {schema}.event AS
-        SELECT * FROM read_parquet('{str(path / "event.parquet").replace("'", "''")}')
+        SELECT * FROM read_parquet('{event_path}')
     """)
 
     con.execute(f"""
         CREATE VIEW {schema}.object AS
-        SELECT * FROM read_parquet('{str(path / "object.parquet").replace("'", "''")}')
+        SELECT * FROM read_parquet('{object_path}')
     """)
 
     con.execute(f"""
         CREATE VIEW {schema}.event_object AS
-        SELECT * FROM read_parquet('{str(path / "event_object.parquet").replace("'", "''")}')
+        SELECT * FROM read_parquet('{event_object_path}')
     """)
 
     con.execute(f"""
         CREATE VIEW {schema}.object_object AS
-        SELECT * FROM read_parquet('{str(path / "object_object.parquet").replace("'", "''")}')
-    """)
-
-    con.execute(f"""
-        CREATE VIEW {schema}.event_type AS
-        SELECT * FROM read_parquet('{str(path / "event_type.parquet").replace("'", "''")}')
-    """)
-
-    con.execute(f"""
-        CREATE VIEW {schema}.object_type AS
-        SELECT * FROM read_parquet('{str(path / "object_type.parquet").replace("'", "''")}')
+        SELECT * FROM read_parquet('{object_object_path}')
     """)
 
     _validate_ocel_tables(con, schema)
@@ -121,6 +119,9 @@ def read_ocel(path: str | Path) -> OCEL:
 
 
 def _validate_ocel_tables(con: duckdb.DuckDBPyConnection, schema: str) -> None:
+    """
+    Validate that the loaded parquet-backed tables expose the required columns.
+    """
     expected = {
         "event": {"ocel_id", "ocel_type", "ocel_time", "attributes"},
         "object": {
@@ -132,8 +133,6 @@ def _validate_ocel_tables(con: duckdb.DuckDBPyConnection, schema: str) -> None:
         },
         "event_object": {"ocel_event_id", "ocel_object_id"},
         "object_object": {"ocel_source_id", "ocel_target_id"},
-        "event_type": {"ocel_type"},
-        "object_type": {"ocel_type"},
     }
 
     for table_name, required_columns in expected.items():

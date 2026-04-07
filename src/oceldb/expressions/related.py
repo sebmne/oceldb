@@ -32,7 +32,7 @@ class Related(Scope):
 
     object_type: str = ""
 
-    def _with_filters(self, filters: tuple[Expr, ...]) -> "Related":
+    def _clone_with_filters(self, filters: tuple[Expr, ...]) -> "Related":
         return Related(object_type=self.object_type, filters=filters)
 
     def _scope_sql(self, ctx: Context) -> str:

@@ -1,10 +1,12 @@
 from __future__ import annotations
 
+from typing import Optional
+
 from oceldb.expressions.context import Context
 from oceldb.expressions.scalar import ScalarExpr
 
 
-def attr(name: str, cast: str | None = None) -> AttrExpr:
+def attr(name: str, cast: Optional[str] = None) -> AttrExpr:
     """
     Build an attribute expression for the current scope.
 
@@ -35,7 +37,7 @@ class AttrExpr(ScalarExpr):
           raising a conversion error.
     """
 
-    def __init__(self, name: str, cast: str | None = None) -> None:
+    def __init__(self, name: str, cast: Optional[str] = None) -> None:
         if not name:
             raise ValueError("Attribute name must not be empty")
 
