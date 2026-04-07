@@ -7,7 +7,6 @@ from pathlib import Path
 import duckdb
 
 from oceldb.core.metadata import OCELMetadata
-from oceldb.inspection.inspector import OCELInspector
 
 
 class OCEL:
@@ -59,12 +58,19 @@ class OCEL:
     # ----- Inspection -----
 
     @property
-    def inspect(self) -> OCELInspector:
+    def inspect(self):
         """
         Access the OCEL inspection and descriptive summary interface.
         """
+        from oceldb.inspect.inspector import OCELInspector
 
         return OCELInspector(self)
+
+    @property
+    def visualize(self):
+        from oceldb.visualize.api import OCELVisualizer
+
+        return OCELVisualizer(self)
 
     # ----- Safe Data Access API -----
 

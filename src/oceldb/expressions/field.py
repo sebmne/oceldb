@@ -1,18 +1,19 @@
 from __future__ import annotations
 
-from typing import Optional
+from typing import Any, Optional
 
+from oceldb.expressions._utils import python_type_to_sql_type
 from oceldb.expressions.context import Context
 from oceldb.expressions.scalar import ScalarExpr
 
 
-def field(name: str, cast: Optional[str] = None) -> "FieldExpr":
+def field(name: str, cast: Optional[type[Any]] = None) -> "FieldExpr":
     """
     Build an expression for a fixed field in the current scope.
 
     Examples:
-        field("ocel_type") == "Order"
-        field("ocel_time").is_not_null()
+        field("ocel_type")
+        field("ocel_time", cast=datetime)
         field("ocel_time", cast="TIMESTAMP")
     """
     return FieldExpr(name=name, cast=cast)
@@ -24,14 +25,24 @@ class FieldExpr(ScalarExpr):
 
     Unlike `attr(...)`, this reads a real SQL column directly from the current
     alias rather than from the JSON payload.
+
+    Examples:
+        field("ocel_type")
+        field("ocel_time", cast=datetime)
+        field("ocel_time", cast="TIMESTAMP")
+
+    Notes:
+        - Without `cast`, the extracted value is treated as text.
+        - With `cast`, TRY_CAST is used so invalid values become NULL instead of
+        raising a conversion error.
     """
 
-    def __init__(self, name: str, cast: Optional[str] = None) -> None:
+    def __init__(self, name: str, cast: Optional[type[Any]] = None) -> None:
         if not name:
             raise ValueError("Field name must not be empty")
 
         self.name = name
-        self.cast = cast
+        self.cast = python_type_to_sql_type(cast)
 
     def to_sql(self, ctx: Context) -> str:
         base = f"{ctx.alias}.{self.name}"

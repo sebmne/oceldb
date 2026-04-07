@@ -1,20 +1,21 @@
 from __future__ import annotations
 
-from typing import Optional
+from typing import Any, Optional
 
+from oceldb.expressions._utils import python_type_to_sql_type
 from oceldb.expressions.context import Context
 from oceldb.expressions.scalar import ScalarExpr
 
 
-def attr(name: str, cast: Optional[str] = None) -> AttrExpr:
+def attr(name: str, cast: Optional[type[Any]] = None) -> AttrExpr:
     """
     Build an attribute expression for the current scope.
 
     Examples:
-        attr("weight")
-        attr("amount", cast="DOUBLE")
-        attr("status") == "open"
-        attr("price", cast="DOUBLE") > 100
+        attr("Weight")
+        attr("Weight", cast=float)
+        attr("created_at", cast=datetime)
+        attr("Weight", cast="DOUBLE")
     """
     return AttrExpr(name=name, cast=cast)
 
@@ -27,9 +28,10 @@ class AttrExpr(ScalarExpr):
     alias in the compilation context.
 
     Examples:
-        attr("weight")
-        attr("weight", cast="DOUBLE")
-        attr("status") == "delivered"
+        attr("Weight")
+        attr("Weight", cast=float)
+        attr("created_at", cast=datetime)
+        attr("Weight", cast="DOUBLE")
 
     Notes:
         - Without `cast`, the extracted value is treated as text.
@@ -37,12 +39,12 @@ class AttrExpr(ScalarExpr):
           raising a conversion error.
     """
 
-    def __init__(self, name: str, cast: Optional[str] = None) -> None:
+    def __init__(self, name: str, cast: Optional[type[Any]] = None) -> None:
         if not name:
             raise ValueError("Attribute name must not be empty")
 
         self.name = name
-        self.cast = cast
+        self.cast = python_type_to_sql_type(cast)
 
     def to_sql(self, ctx: Context) -> str:
         """
