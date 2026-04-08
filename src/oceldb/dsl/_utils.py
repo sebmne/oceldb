@@ -4,16 +4,6 @@ from typing import Any, Optional
 
 
 def python_type_to_sql_type(tp: Optional[type[Any]]) -> Optional[str]:
-    """
-    Convert a supported Python type into a DuckDB SQL type name.
-
-    Accepts either:
-        - a Python type such as `int` or `datetime`
-        - `None`
-
-    Returns:
-        The SQL type string, or `None` if no cast is requested.
-    """
     if tp is None:
         return None
 

@@ -1,54 +1,55 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
-from typing import Optional
+from dataclasses import dataclass, field
+from typing import Optional, Tuple
 
-from oceldb.expressions.base import Expr
-from oceldb.expressions.context import ScopeKind
+from oceldb.ast.base import BoolExpr
+from oceldb.compiler.context import ScopeKind
+from oceldb.dsl import type_
 from oceldb.query.base import BaseQuery
 
 
 @dataclass(frozen=True)
 class EventQuery(BaseQuery):
-    event_types: tuple[str, ...] = ()
+    """
+    Root query over OCEL events.
+    """
 
-    def _clone_with_filters(self, filters: tuple[Expr, ...]) -> "EventQuery":
+    event_types: Tuple[str, ...] = field(default_factory=tuple)
+
+    root_alias: str = field(init=False, default="e")
+    root_kind: ScopeKind = field(init=False, default="event")
+    root_table_name: str = field(init=False, default="event")
+    id_column: str = field(init=False, default="ocel_id")
+
+    def _clone_with_filters(self, filters: Tuple[BoolExpr, ...]):
         return EventQuery(
             ocel=self.ocel,
-            event_types=self.event_types,
             filters=filters,
+            event_types=self.event_types,
         )
 
-    def _root_alias(self) -> str:
-        return "e"
-
-    def _root_kind(self) -> ScopeKind:
-        return "event"
-
-    def _root_table_name(self) -> str:
-        return "event"
-
-    def _type_filter_sql(self) -> Optional[str]:
+    def _type_filter_expr(self) -> Optional[BoolExpr]:
         if not self.event_types:
             return None
 
-        escaped_types = ", ".join(
-            f"'{event_type.replace("'", "''")}'" for event_type in self.event_types
-        )
-        return f"e.ocel_type IN ({escaped_types})"
+        if len(self.event_types) == 1:
+            return type_() == self.event_types[0]
+
+        from oceldb.dsl.functions import in_
+
+        return in_(type_(), self.event_types)
 
     def _materialize_sublog(self, target_schema: str) -> None:
         source_schema = self.ocel.schema
         con = self.ocel._con
 
-        # Root events selected by this query.
         con.execute(f"""
             CREATE VIEW {target_schema}._root AS
-            SELECT ocel_id
+            SELECT DISTINCT ocel_id
             FROM ({self.to_sql()}) q
         """)
 
-        # Retained events are exactly the selected root events.
         con.execute(f"""
             CREATE VIEW {target_schema}.event AS
             SELECT DISTINCT e.*
@@ -56,10 +57,3 @@ class EventQuery(BaseQuery):
             JOIN {target_schema}._root r
               ON e.ocel_id = r.ocel_id
         """)
-
-        self._materialize_common_sublog_views(target_schema)
-
-    def __repr__(self) -> str:
-        return (
-            f"EventQuery(event_types={self.event_types!r}, filters={len(self.filters)})"
-        )

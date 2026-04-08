@@ -1,54 +1,66 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
-from typing import Optional
+from dataclasses import dataclass, field
+from typing import Optional, Tuple
 
-from oceldb.expressions.base import Expr
-from oceldb.expressions.context import ScopeKind
+from oceldb.ast.base import BoolExpr
+from oceldb.compiler.context import ScopeKind
+from oceldb.dsl import type_
 from oceldb.query.base import BaseQuery
 
 
 @dataclass(frozen=True)
 class ObjectQuery(BaseQuery):
-    object_types: tuple[str, ...] = ()
+    """
+    Root query over logical OCEL objects.
+    """
 
-    def _clone_with_filters(self, filters: tuple[Expr, ...]) -> "ObjectQuery":
+    object_types: Tuple[str, ...] = field(default_factory=tuple)
+
+    root_alias: str = field(init=False, default="o")
+    root_kind: ScopeKind = field(init=False, default="object")
+    root_table_name: str = field(init=False, default="object")
+    id_column: str = field(init=False, default="ocel_id")
+
+    def _clone_with_filters(self, filters: Tuple[BoolExpr, ...]):
         return ObjectQuery(
             ocel=self.ocel,
-            object_types=self.object_types,
             filters=filters,
+            object_types=self.object_types,
         )
 
-    def _root_alias(self) -> str:
-        return "o"
+    def count(self) -> int:
+        """
+        Count distinct logical objects, not raw object-history rows.
+        """
+        row = self.ocel.sql(
+            f"SELECT COUNT(DISTINCT ocel_id) FROM ({self.to_sql()}) q"
+        ).fetchone()
+        if row is None:
+            raise RuntimeError("COUNT query returned no rows")
+        return int(row[0])
 
-    def _root_kind(self) -> ScopeKind:
-        return "object"
-
-    def _root_table_name(self) -> str:
-        return "object"
-
-    def _type_filter_sql(self) -> Optional[str]:
+    def _type_filter_expr(self) -> Optional[BoolExpr]:
         if not self.object_types:
             return None
 
-        escaped_types = ", ".join(
-            f"'{object_type.replace("'", "''")}'" for object_type in self.object_types
-        )
-        return f"o.ocel_type IN ({escaped_types})"
+        if len(self.object_types) == 1:
+            return type_() == self.object_types[0]
+
+        from oceldb.dsl.functions import in_
+
+        return in_(type_(), self.object_types)
 
     def _materialize_sublog(self, target_schema: str) -> None:
         source_schema = self.ocel.schema
         con = self.ocel._con
 
-        # Root objects selected by this query.
         con.execute(f"""
             CREATE VIEW {target_schema}._root AS
-            SELECT ocel_id
+            SELECT DISTINCT ocel_id
             FROM ({self.to_sql()}) q
         """)
 
-        # All events attached to the selected root objects.
         con.execute(f"""
             CREATE VIEW {target_schema}.event AS
             SELECT DISTINCT e.*
@@ -58,13 +70,3 @@ class ObjectQuery(BaseQuery):
             JOIN {target_schema}._root r
               ON eo.ocel_object_id = r.ocel_id
         """)
-
-        self._materialize_common_sublog_views(target_schema)
-
-    def __repr__(self) -> str:
-        return (
-            f"ObjectQuery("
-            f"object_types={self.object_types!r}, "
-            f"filters={len(self.filters)}"
-            f")"
-        )
