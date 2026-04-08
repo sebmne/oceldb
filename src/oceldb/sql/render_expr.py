@@ -30,7 +30,7 @@ from oceldb.ast.relation import (
     RelationExistsExpr,
     RelationSpec,
 )
-from oceldb.compiler.context import CompileContext
+from oceldb.sql.context import CompileContext
 
 
 def render_expr(expr: Expr, ctx: CompileContext) -> str:

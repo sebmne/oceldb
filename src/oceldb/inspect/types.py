@@ -2,17 +2,15 @@ from __future__ import annotations
 
 from typing import Dict, List
 
+from oceldb.analysis.api import analyze
 from oceldb.core.ocel import OCEL
 from oceldb.dsl import asc, count, count_distinct, desc, id_, type_
 
 
 def event_types(ocel: OCEL) -> List[str]:
-    """
-    Return the sorted list of event types present in the OCEL.
-    """
     rows = (
-        ocel.events()
-        .table()
+        analyze(ocel)
+        .events()
         .select(type_().as_("ocel_type"))
         .distinct()
         .order_by(asc("ocel_type"))
@@ -23,15 +21,9 @@ def event_types(ocel: OCEL) -> List[str]:
 
 
 def object_types(ocel: OCEL) -> List[str]:
-    """
-    Return the sorted list of object types present in the OCEL.
-
-    Types are derived from the physical object-history table, but duplicates are
-    removed through the analytical DSL.
-    """
     rows = (
-        ocel.objects()
-        .table()
+        analyze(ocel)
+        .objects()
         .select(type_().as_("ocel_type"))
         .distinct()
         .order_by(asc("ocel_type"))
@@ -42,9 +34,6 @@ def object_types(ocel: OCEL) -> List[str]:
 
 
 def types(ocel: OCEL) -> Dict[str, List[str]]:
-    """
-    Return both event and object types.
-    """
     return {
         "event": event_types(ocel),
         "object": object_types(ocel),
@@ -52,12 +41,9 @@ def types(ocel: OCEL) -> Dict[str, List[str]]:
 
 
 def event_type_counts(ocel: OCEL) -> Dict[str, int]:
-    """
-    Return the number of events per event type.
-    """
     rows = (
-        ocel.events()
-        .table()
+        analyze(ocel)
+        .events()
         .select(type_().as_("event_type"))
         .group_by(type_())
         .agg(count().as_("event_count"))
@@ -70,15 +56,9 @@ def event_type_counts(ocel: OCEL) -> Dict[str, int]:
 
 
 def object_type_counts(ocel: OCEL) -> Dict[str, int]:
-    """
-    Return the number of logical objects per object type.
-
-    Logical objects are counted via DISTINCT `ocel_id`, not via raw
-    object-history row counts.
-    """
     rows = (
-        ocel.objects()
-        .table()
+        analyze(ocel)
+        .objects()
         .select(type_().as_("object_type"))
         .group_by(type_())
         .agg(count_distinct(id_()).as_("object_count"))

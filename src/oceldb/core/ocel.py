@@ -68,7 +68,7 @@ class OCEL:
 
     # ----- Safe Data Access API -----
 
-    def objects(self, *types: str):
+    def objects(self, *object_types: str):
         """
         Start a lazy object-centric query.
 
@@ -77,14 +77,15 @@ class OCEL:
             ocel.objects("Order")
             ocel.objects("Order", "Invoice")
         """
-        from oceldb.query.object_query import ObjectQuery
+        from oceldb.sublog.query.view_query import ViewQuery
 
-        return ObjectQuery(
+        return ViewQuery(
             ocel=self,
-            object_types=tuple(types),
+            root_kind="object",
+            selected_types=tuple(object_types),
         )
 
-    def events(self, *types: str):
+    def events(self, *event_types: str):
         """
         Start a lazy event-centric query.
 
@@ -93,11 +94,12 @@ class OCEL:
             ocel.events("Create Order")
             ocel.events("Create Order", "Cancel Order")
         """
-        from oceldb.query.event_query import EventQuery
+        from oceldb.sublog.query.view_query import ViewQuery
 
-        return EventQuery(
+        return ViewQuery(
             ocel=self,
-            event_types=tuple(types),
+            root_kind="event",
+            selected_types=tuple(event_types),
         )
 
     def sql(self, query: str) -> duckdb.DuckDBPyRelation:

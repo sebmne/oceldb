@@ -248,9 +248,9 @@ def _build_event_select(
     escaped_type = type_name.replace("'", "''")
 
     time_sql = (
-        'p."ocel_time" AS ocel_time'
+        'TRY_CAST(p."ocel_time" AS TIMESTAMP) AS ocel_time'
         if "ocel_time" in payload_columns
-        else "NULL AS ocel_time"
+        else "CAST(NULL AS TIMESTAMP) AS ocel_time"
     )
 
     return f"""
@@ -294,9 +294,9 @@ def _build_object_select(
     escaped_type = type_name.replace("'", "''")
 
     time_sql = (
-        'p."ocel_time" AS ocel_time'
+        'TRY_CAST(p."ocel_time" AS TIMESTAMP) AS ocel_time'
         if "ocel_time" in payload_columns
-        else "NULL AS ocel_time"
+        else "CAST(NULL AS TIMESTAMP) AS ocel_time"
     )
 
     changed_field_sql = (

@@ -1,29 +1,22 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Any, Optional, Tuple
+from typing import Any, Literal, Optional, Tuple
 
 import duckdb
 
 from oceldb.ast.base import AggregateExpr, Expr, OrderExpr
-from oceldb.compiler.context import CompileContext, ScopeKind
 from oceldb.core.ocel import OCEL
+from oceldb.dsl import count, count_distinct
+
+AnalysisTableKind = Literal["event", "object", "event_object", "object_object"]
 
 
 @dataclass(frozen=True)
 class TableQuery:
-    """
-    Tabular analytical query built on top of a root OCEL query.
-
-    This query layer supports projection, grouping, aggregation, ordering, and
-    limiting over the current root scope.
-    """
-
     ocel: OCEL
-    root_table: str
-    root_alias: str
-    root_kind: ScopeKind
-    where_sql: str
+    table_kind: AnalysisTableKind
+
     selections: Tuple[Expr, ...] = field(default_factory=tuple)
     groupings: Tuple[Expr, ...] = field(default_factory=tuple)
     aggregations: Tuple[AggregateExpr | Expr, ...] = field(default_factory=tuple)
@@ -31,13 +24,14 @@ class TableQuery:
     is_distinct: bool = False
     limit_n: Optional[int] = None
 
+    @classmethod
+    def from_source(cls, ocel: OCEL, table_kind: AnalysisTableKind) -> "TableQuery":
+        return cls(ocel=ocel, table_kind=table_kind)
+
     def select(self, *exprs: Expr) -> "TableQuery":
         return TableQuery(
             ocel=self.ocel,
-            root_table=self.root_table,
-            root_alias=self.root_alias,
-            root_kind=self.root_kind,
-            where_sql=self.where_sql,
+            table_kind=self.table_kind,
             selections=self.selections + tuple(exprs),
             groupings=self.groupings,
             aggregations=self.aggregations,
@@ -49,10 +43,7 @@ class TableQuery:
     def distinct(self) -> "TableQuery":
         return TableQuery(
             ocel=self.ocel,
-            root_table=self.root_table,
-            root_alias=self.root_alias,
-            root_kind=self.root_kind,
-            where_sql=self.where_sql,
+            table_kind=self.table_kind,
             selections=self.selections,
             groupings=self.groupings,
             aggregations=self.aggregations,
@@ -64,10 +55,7 @@ class TableQuery:
     def group_by(self, *exprs: Expr) -> "TableQuery":
         return TableQuery(
             ocel=self.ocel,
-            root_table=self.root_table,
-            root_alias=self.root_alias,
-            root_kind=self.root_kind,
-            where_sql=self.where_sql,
+            table_kind=self.table_kind,
             selections=self.selections,
             groupings=self.groupings + tuple(exprs),
             aggregations=self.aggregations,
@@ -79,10 +67,7 @@ class TableQuery:
     def agg(self, *exprs: AggregateExpr | Expr) -> "TableQuery":
         return TableQuery(
             ocel=self.ocel,
-            root_table=self.root_table,
-            root_alias=self.root_alias,
-            root_kind=self.root_kind,
-            where_sql=self.where_sql,
+            table_kind=self.table_kind,
             selections=self.selections,
             groupings=self.groupings,
             aggregations=self.aggregations + tuple(exprs),
@@ -94,10 +79,7 @@ class TableQuery:
     def order_by(self, *exprs: OrderExpr) -> "TableQuery":
         return TableQuery(
             ocel=self.ocel,
-            root_table=self.root_table,
-            root_alias=self.root_alias,
-            root_kind=self.root_kind,
-            where_sql=self.where_sql,
+            table_kind=self.table_kind,
             selections=self.selections,
             groupings=self.groupings,
             aggregations=self.aggregations,
@@ -109,12 +91,10 @@ class TableQuery:
     def limit(self, n: int) -> "TableQuery":
         if n < 0:
             raise ValueError("Limit must be non-negative")
+
         return TableQuery(
             ocel=self.ocel,
-            root_table=self.root_table,
-            root_alias=self.root_alias,
-            root_kind=self.root_kind,
-            where_sql=self.where_sql,
+            table_kind=self.table_kind,
             selections=self.selections,
             groupings=self.groupings,
             aggregations=self.aggregations,
@@ -132,49 +112,27 @@ class TableQuery:
             raise RuntimeError("Scalar query returned no rows")
         return row[0]
 
+    def exists(self) -> bool:
+        row = self.ocel.sql(
+            f"SELECT EXISTS(SELECT 1 FROM ({self.to_sql()}) q)"
+        ).fetchone()
+        if row is None:
+            raise RuntimeError("EXISTS query returned no rows")
+        return bool(row[0])
+
+    def count(self) -> int:
+        row = self.agg(count().as_("count")).relation().fetchone()
+        if row is None:
+            raise RuntimeError("COUNT query returned no rows")
+        return int(row[0])
+
+    def count_distinct(self, expr: Expr) -> int:
+        row = self.agg(count_distinct(expr).as_("count")).relation().fetchone()
+        if row is None:
+            raise RuntimeError("COUNT DISTINCT query returned no rows")
+        return int(row[0])
+
     def to_sql(self) -> str:
-        from oceldb.compiler.render_expr import render_expr, render_order_expr
+        from oceldb.analysis.compiler.render_query import render_table_query
 
-        ctx = CompileContext(
-            alias=self.root_alias,
-            schema=self.ocel.schema,
-            kind=self.root_kind,
-        )
-
-        select_parts = []
-
-        if self.selections:
-            select_parts.extend(render_expr(expr, ctx) for expr in self.selections)
-
-        if self.aggregations:
-            select_parts.extend(render_expr(expr, ctx) for expr in self.aggregations)
-
-        if not select_parts:
-            if self.groupings:
-                select_parts.extend(render_expr(expr, ctx) for expr in self.groupings)
-            else:
-                select_parts.append("*")
-
-        distinct_sql = "DISTINCT " if self.is_distinct else ""
-        select_sql = ", ".join(select_parts)
-
-        sql = f"""
-            SELECT {distinct_sql}{select_sql}
-            FROM {self.root_table} {self.root_alias}
-            WHERE {self.where_sql}
-        """
-
-        if self.groupings:
-            group_by_sql = ", ".join(render_expr(expr, ctx) for expr in self.groupings)
-            sql += f"\nGROUP BY {group_by_sql}"
-
-        if self.orderings:
-            order_by_sql = ", ".join(
-                render_order_expr(expr, ctx) for expr in self.orderings
-            )
-            sql += f"\nORDER BY {order_by_sql}"
-
-        if self.limit_n is not None:
-            sql += f"\nLIMIT {self.limit_n}"
-
-        return sql
+        return render_table_query(self)
