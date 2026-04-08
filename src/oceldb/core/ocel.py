@@ -66,12 +66,6 @@ class OCEL:
 
         return OCELInspector(self)
 
-    @property
-    def visualize(self):
-        from oceldb.visualize.api import OCELVisualizer
-
-        return OCELVisualizer(self)
-
     # ----- Safe Data Access API -----
 
     def objects(self, *types: str):
