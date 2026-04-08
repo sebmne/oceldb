@@ -1,16 +1,12 @@
-from __future__ import annotations
-
 from typing import Dict, List
 
-from oceldb.analysis.api import analyze
 from oceldb.core.ocel import OCEL
 from oceldb.dsl import asc, count, count_distinct, desc, id_, type_
 
 
 def event_types(ocel: OCEL) -> List[str]:
     rows = (
-        analyze(ocel)
-        .events()
+        ocel.tables.events()
         .select(type_().as_("ocel_type"))
         .distinct()
         .order_by(asc("ocel_type"))
@@ -22,8 +18,7 @@ def event_types(ocel: OCEL) -> List[str]:
 
 def object_types(ocel: OCEL) -> List[str]:
     rows = (
-        analyze(ocel)
-        .objects()
+        ocel.tables.objects()
         .select(type_().as_("ocel_type"))
         .distinct()
         .order_by(asc("ocel_type"))
@@ -42,8 +37,7 @@ def types(ocel: OCEL) -> Dict[str, List[str]]:
 
 def event_type_counts(ocel: OCEL) -> Dict[str, int]:
     rows = (
-        analyze(ocel)
-        .events()
+        ocel.tables.events()
         .select(type_().as_("event_type"))
         .group_by(type_())
         .agg(count().as_("event_count"))
@@ -57,8 +51,7 @@ def event_type_counts(ocel: OCEL) -> Dict[str, int]:
 
 def object_type_counts(ocel: OCEL) -> Dict[str, int]:
     rows = (
-        analyze(ocel)
-        .objects()
+        ocel.tables.objects()
         .select(type_().as_("object_type"))
         .group_by(type_())
         .agg(count_distinct(id_()).as_("object_count"))

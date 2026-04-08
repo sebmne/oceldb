@@ -1,7 +1,5 @@
 """Core OCEL class — pure data representation of an OCEL 2.0 log."""
 
-from __future__ import annotations
-
 from pathlib import Path
 
 import duckdb
@@ -55,8 +53,6 @@ class OCEL:
         """The DuckDB schema backing this OCEL instance."""
         return self._schema
 
-    # ----- Inspection -----
-
     @property
     def inspect(self):
         """
@@ -66,7 +62,11 @@ class OCEL:
 
         return OCELInspector(self)
 
-    # ----- Safe Data Access API -----
+    @property
+    def tables(self):
+        from oceldb.tables.api import OCELTables
+
+        return OCELTables(self)
 
     def objects(self, *object_types: str):
         """
@@ -77,7 +77,7 @@ class OCEL:
             ocel.objects("Order")
             ocel.objects("Order", "Invoice")
         """
-        from oceldb.sublog.query.view_query import ViewQuery
+        from oceldb.views.query.view_query import ViewQuery
 
         return ViewQuery(
             ocel=self,
@@ -94,7 +94,7 @@ class OCEL:
             ocel.events("Create Order")
             ocel.events("Create Order", "Cancel Order")
         """
-        from oceldb.sublog.query.view_query import ViewQuery
+        from oceldb.views.query.view_query import ViewQuery
 
         return ViewQuery(
             ocel=self,
@@ -117,8 +117,6 @@ class OCEL:
         """
         return self._con.sql(query)
 
-    # ----- Lifecycle Methods -----
-
     def close(self) -> None:
         """Safely close the DuckDB connection."""
         if self._owns_connection:
@@ -126,7 +124,7 @@ class OCEL:
         else:
             self._con.execute(f"DROP SCHEMA {self._schema} CASCADE")
 
-    def __enter__(self) -> OCEL:
+    def __enter__(self) -> "OCEL":
         return self
 
     def __exit__(self, *exc) -> None:

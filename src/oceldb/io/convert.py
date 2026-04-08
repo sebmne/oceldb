@@ -1,7 +1,5 @@
 """Convert strict OCEL 2.0 SQLite files into the oceldb parquet directory format."""
 
-from __future__ import annotations
-
 import json
 import shutil
 from datetime import datetime, timezone

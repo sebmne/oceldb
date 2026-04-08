@@ -37,3 +37,31 @@ def changed_field() -> FieldExpr:
     Shorthand for the object changed-field column.
     """
     return field("ocel_changed_field")
+
+
+def event_id() -> FieldExpr:
+    """
+    Shorthand for the event id column in event-object relations.
+    """
+    return field("ocel_event_id")
+
+
+def object_id() -> FieldExpr:
+    """
+    Shorthand for the object id column in event-object relations.
+    """
+    return field("ocel_object_id")
+
+
+def source_id() -> FieldExpr:
+    """
+    Shorthand for the object source id column in object-object relations.
+    """
+    return field("ocel_source_id")
+
+
+def target_id() -> FieldExpr:
+    """
+    Shorthand for the object target id column in object-object relations.
+    """
+    return field("ocel_target_id")

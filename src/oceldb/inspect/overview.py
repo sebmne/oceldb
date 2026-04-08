@@ -1,10 +1,7 @@
-from __future__ import annotations
-
 from dataclasses import dataclass
 from datetime import datetime
 from typing import Optional
 
-from oceldb.analysis.api import analyze
 from oceldb.core.ocel import OCEL
 from oceldb.dsl import id_, max_, min_
 from oceldb.dsl.fields import time_
@@ -22,14 +19,14 @@ class OCELOverview:
 
 
 def overview(ocel: OCEL) -> OCELOverview:
-    event_count = analyze(ocel).events().count_distinct(id_())
-    object_count = analyze(ocel).objects().count_distinct(id_())
+    event_count = ocel.tables.events().count_distinct(id_())
+    object_count = ocel.tables.objects().count_distinct(id_())
 
     event_type_count = len(event_types(ocel))
     object_type_count = len(object_types(ocel))
 
-    earliest_event_time = analyze(ocel).events().agg(min_(time_())).scalar()
-    latest_event_time = analyze(ocel).events().agg(max_(time_())).scalar()
+    earliest_event_time = ocel.tables.events().agg(min_(time_())).scalar()
+    latest_event_time = ocel.tables.events().agg(max_(time_())).scalar()
 
     return OCELOverview(
         event_count=event_count,

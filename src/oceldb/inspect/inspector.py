@@ -1,7 +1,6 @@
-from __future__ import annotations
-
 from oceldb.core.ocel import OCEL
 from oceldb.inspect.overview import OCELOverview, overview
+from oceldb.inspect.relations import event_object_stats
 from oceldb.inspect.types import (
     event_type_counts,
     event_types,
@@ -32,3 +31,6 @@ class OCELInspector:
 
     def overview(self) -> OCELOverview:
         return overview(self._ocel)
+
+    def event_object_stats(self):
+        return event_object_stats(self._ocel)

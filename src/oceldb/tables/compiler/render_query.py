@@ -1,9 +1,7 @@
-from __future__ import annotations
-
-from oceldb.analysis.compiler.render_source import render_analysis_source
-from oceldb.analysis.query.table_query import AnalysisTableKind, TableQuery
 from oceldb.sql.context import CompileContext, ExprScopeKind
 from oceldb.sql.render_expr import render_expr, render_order_expr
+from oceldb.tables.compiler.render_source import render_analysis_source
+from oceldb.tables.query.table_query import AnalysisTableKind, TableQuery
 
 
 def render_table_query(query: TableQuery) -> str:

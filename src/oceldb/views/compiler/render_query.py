@@ -1,7 +1,6 @@
-from oceldb.sql.render_expr import render_bool_expr
-
 from oceldb.sql.context import CompileContext
-from oceldb.sublog.query.view_query import ViewQuery
+from oceldb.sql.render_expr import render_bool_expr
+from oceldb.views.query.view_query import ViewQuery
 
 
 def render_view_query(query: ViewQuery) -> str:

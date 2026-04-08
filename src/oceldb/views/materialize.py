@@ -1,9 +1,7 @@
-from __future__ import annotations
-
 from uuid import uuid4
 
 from oceldb.core.ocel import OCEL
-from oceldb.sublog.query.view_query import ViewQuery
+from oceldb.views.query.view_query import ViewQuery
 
 
 def materialize_view_query(query: ViewQuery) -> OCEL:

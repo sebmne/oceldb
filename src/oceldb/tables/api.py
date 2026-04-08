@@ -1,17 +1,11 @@
-from __future__ import annotations
-
 from dataclasses import dataclass
 
-from oceldb.analysis.query.table_query import TableQuery
 from oceldb.core.ocel import OCEL
-
-
-def analyze(ocel: OCEL) -> AnalysisContext:
-    return AnalysisContext(ocel)
+from oceldb.tables.query.table_query import TableQuery
 
 
 @dataclass(frozen=True)
-class AnalysisContext:
+class OCELTables:
     ocel: OCEL
 
     def events(self) -> TableQuery:

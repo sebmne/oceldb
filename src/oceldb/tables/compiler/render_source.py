@@ -1,9 +1,7 @@
-from __future__ import annotations
-
 from dataclasses import dataclass
 
-from oceldb.analysis.query.table_query import AnalysisTableKind
 from oceldb.core.ocel import OCEL
+from oceldb.tables.query.table_query import AnalysisTableKind
 
 
 @dataclass(frozen=True)

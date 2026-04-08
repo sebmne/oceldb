@@ -1,5 +1,3 @@
-from __future__ import annotations
-
 from dataclasses import dataclass, field
 from typing import Any, Literal, Optional, Tuple
 
@@ -133,6 +131,6 @@ class TableQuery:
         return int(row[0])
 
     def to_sql(self) -> str:
-        from oceldb.analysis.compiler.render_query import render_table_query
+        from oceldb.tables.compiler.render_query import render_table_query
 
         return render_table_query(self)

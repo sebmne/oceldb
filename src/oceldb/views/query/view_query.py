@@ -1,5 +1,3 @@
-from __future__ import annotations
-
 from dataclasses import dataclass, field
 from typing import Literal, Optional, Tuple
 
@@ -12,7 +10,7 @@ ViewScopeKind = Literal["event", "object"]
 @dataclass(frozen=True)
 class ViewQuery:
     """
-    Immutable semantic sublog/view query.
+    Immutable semantic view query.
 
     This query selects either events or objects from an OCEL and can later be:
     - compiled to SQL
@@ -58,12 +56,12 @@ class ViewQuery:
         return [row[0] for row in rows]
 
     def to_sql(self) -> str:
-        from oceldb.sublog.compiler.render_query import render_view_query
+        from oceldb.views.compiler.render_query import render_view_query
 
         return render_view_query(self)
 
     def to_ocel(self) -> OCEL:
-        from oceldb.sublog.materialize import materialize_view_query
+        from oceldb.views.materialize import materialize_view_query
 
         return materialize_view_query(self)
 
