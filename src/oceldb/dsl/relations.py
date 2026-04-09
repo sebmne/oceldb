@@ -8,6 +8,7 @@ from oceldb.ast.relation import (
     RelationAllExpr,
     RelationCountExpr,
     RelationExistsExpr,
+    RelationKind,
     RelationSpec,
 )
 
@@ -45,7 +46,7 @@ class RelationBuilder:
     Fluent builder for relation-based predicates.
     """
 
-    kind: str
+    kind: RelationKind
     target_type: str
     filters: Tuple[BoolExpr, ...] = field(default_factory=tuple)
 

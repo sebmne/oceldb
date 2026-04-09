@@ -8,6 +8,8 @@ def render_table_query(query: TableQuery) -> str:
     """
     Compile an analytical table query into SQL.
     """
+    _validate(query)
+
     rendered_source = render_analysis_source(query.ocel, query.table_kind)
 
     ctx = CompileContext(
@@ -66,3 +68,24 @@ def _expr_scope_kind(table_kind: AnalysisTableKind) -> ExprScopeKind:
             return "object_object"
         case _:
             raise TypeError(f"Unsupported analysis table kind: {table_kind!r}")
+
+
+def _validate(query: TableQuery) -> None:
+    """
+    Validate the semantic consistency of this table query.
+    """
+    if query.aggregations and query.selections:
+        if not query.groupings:
+            raise ValueError(
+                "Cannot combine select(...) and agg(...) without group_by(...). "
+                "Use only agg(...) for global aggregation, or add group_by(...)."
+            )
+
+        grouping_set = set(query.groupings)
+        missing = [expr for expr in query.selections if expr not in grouping_set]
+
+        if missing:
+            raise ValueError(
+                "All selected non-aggregate expressions must also appear in "
+                "group_by(...)."
+            )
