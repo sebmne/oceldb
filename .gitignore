@@ -1,5 +1,7 @@
 mise.toml
 .DS_Store
+test.custom
+node_modules/
 
 # Byte-compiled / optimized / DLL files
 __pycache__/

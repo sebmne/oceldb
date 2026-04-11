@@ -1,0 +1,11 @@
+[project]
+name = "oceldb"
+version = "0.2.0"
+description = "Add your description here"
+authors = [{name = "Sebastian Menne", email = "sebastian.menne@rwth-aachen.de"}]
+license = {text = "MIT"}
+readme = "README.md"
+requires-python = ">=3.13"
+dependencies = [
+    "duckdb>=1.5.1",
+]
