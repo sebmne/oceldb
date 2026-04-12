@@ -1,17 +1,11 @@
 from __future__ import annotations
 
-from oceldb.ast.base import Expr, OrderExpr
+from oceldb.ast.base import Expr, SortExpr
 
 
-def asc(expr: Expr | str) -> OrderExpr:
-    """
-    Build an ascending order specification.
-    """
-    return OrderExpr(expr=expr, direction="ASC")
+def asc(expr: Expr | str) -> SortExpr:
+    return SortExpr(expr=expr, descending=False)
 
 
-def desc(expr: Expr | str) -> OrderExpr:
-    """
-    Build a descending order specification.
-    """
-    return OrderExpr(expr=expr, direction="DESC")
+def desc(expr: Expr | str) -> SortExpr:
+    return SortExpr(expr=expr, descending=True)

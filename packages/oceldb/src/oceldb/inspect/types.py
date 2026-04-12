@@ -1,16 +1,19 @@
+from __future__ import annotations
+
 from typing import Dict, List
 
 from oceldb.core.ocel import OCEL
-from oceldb.dsl import asc, count, count_distinct, desc, id_, type_
+from oceldb.dsl import asc, col, count, desc
 
 
 def event_types(ocel: OCEL) -> List[str]:
     rows = (
-        ocel.tables.events()
-        .select(type_().as_("ocel_type"))
-        .distinct()
-        .order_by(asc("ocel_type"))
-        .relation()
+        ocel.query()
+        .events()
+        .select(col("ocel_type"))
+        .unique()
+        .sort(asc("ocel_type"))
+        .collect()
         .fetchall()
     )
     return [row[0] for row in rows]
@@ -18,11 +21,12 @@ def event_types(ocel: OCEL) -> List[str]:
 
 def object_types(ocel: OCEL) -> List[str]:
     rows = (
-        ocel.tables.objects()
-        .select(type_().as_("ocel_type"))
-        .distinct()
-        .order_by(asc("ocel_type"))
-        .relation()
+        ocel.query()
+        .objects()
+        .select(col("ocel_type"))
+        .unique()
+        .sort(asc("ocel_type"))
+        .collect()
         .fetchall()
     )
     return [row[0] for row in rows]
@@ -37,12 +41,12 @@ def types(ocel: OCEL) -> Dict[str, List[str]]:
 
 def event_type_counts(ocel: OCEL) -> Dict[str, int]:
     rows = (
-        ocel.tables.events()
-        .select(type_().as_("event_type"))
-        .group_by(type_())
-        .agg(count().as_("event_count"))
-        .order_by(desc("event_count"), asc("event_type"))
-        .relation()
+        ocel.query()
+        .events()
+        .group_by("ocel_type")
+        .agg(count().alias("event_count"))
+        .sort(desc("event_count"), asc("ocel_type"))
+        .collect()
         .fetchall()
     )
 
@@ -51,12 +55,12 @@ def event_type_counts(ocel: OCEL) -> Dict[str, int]:
 
 def object_type_counts(ocel: OCEL) -> Dict[str, int]:
     rows = (
-        ocel.tables.objects()
-        .select(type_().as_("object_type"))
-        .group_by(type_())
-        .agg(count_distinct(id_()).as_("object_count"))
-        .order_by(desc("object_count"), asc("object_type"))
-        .relation()
+        ocel.query()
+        .objects()
+        .group_by("ocel_type")
+        .agg(count().alias("object_count"))
+        .sort(desc("object_count"), asc("ocel_type"))
+        .collect()
         .fetchall()
     )
 

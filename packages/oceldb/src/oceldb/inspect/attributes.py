@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 from typing import Dict, List
 
 from oceldb.core.ocel import OCEL
@@ -5,52 +7,42 @@ from oceldb.inspect.types import event_types, object_types
 
 
 def event_attributes(ocel: OCEL, event_type: str) -> List[str]:
-    """
-    Return the sorted list of custom attributes used by a given event type.
-
-    This currently uses SQL directly because JSON key discovery is not yet
-    modeled naturally in the analytical DSL.
-    """
-    escaped = event_type.replace("'", "''")
-    rows = ocel.sql(f"""
-        SELECT DISTINCT UNNEST(json_keys(attributes::JSON))
-        FROM {ocel.schema}.event
-        WHERE ocel_type = '{escaped}'
-          AND attributes IS NOT NULL
-        ORDER BY 1
-    """).fetchall()
-    return [row[0] for row in rows]
+    return _type_attributes(ocel, table_name="event", type_name=event_type)
 
 
 def object_attributes(ocel: OCEL, object_type: str) -> List[str]:
-    """
-    Return the sorted list of custom attributes used by a given object type.
-
-    This currently uses SQL directly because JSON key discovery is not yet
-    modeled naturally in the analytical DSL.
-    """
-    escaped = object_type.replace("'", "''")
-    rows = ocel.sql(f"""
-        SELECT DISTINCT UNNEST(json_keys(attributes::JSON))
-        FROM {ocel.schema}.object
-        WHERE ocel_type = '{escaped}'
-          AND attributes IS NOT NULL
-        ORDER BY 1
-    """).fetchall()
-    return [row[0] for row in rows]
+    return _type_attributes(ocel, table_name="object", type_name=object_type)
 
 
 def attributes(ocel: OCEL) -> Dict[str, Dict[str, List[str]]]:
-    """
-    Return all discovered custom attributes grouped by type.
-    """
     return {
         "event": {
-            event_type_name: event_attributes(ocel, event_type_name)
-            for event_type_name in event_types(ocel)
+            name: event_attributes(ocel, name)
+            for name in event_types(ocel)
         },
         "object": {
-            object_type_name: object_attributes(ocel, object_type_name)
-            for object_type_name in object_types(ocel)
+            name: object_attributes(ocel, name)
+            for name in object_types(ocel)
         },
     }
+
+
+def _type_attributes(ocel: OCEL, *, table_name: str, type_name: str) -> List[str]:
+    custom_columns = sorted(ocel.manifest.table(table_name).custom_columns)
+    escaped_type = type_name.replace("'", "''")
+
+    present: list[str] = []
+    for column_name in custom_columns:
+        escaped_column = column_name.replace('"', '""')
+        row = ocel.sql(f"""
+            SELECT EXISTS(
+                SELECT 1
+                FROM "{ocel.schema}"."{table_name}"
+                WHERE "ocel_type" = '{escaped_type}'
+                  AND "{escaped_column}" IS NOT NULL
+            )
+        """).fetchone()
+        if row and bool(row[0]):
+            present.append(column_name)
+
+    return present

@@ -1,27 +1,36 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
-from typing import Literal, Tuple
+from dataclasses import dataclass, field
+from typing import Literal
 
-from oceldb.ast.base import BoolExpr, ScalarExpr
+from oceldb.ast.base import BoolExpr, ExprVisitor, ScalarExpr, T
 
 RelationKind = Literal["related", "linked", "has_event"]
 
 
 @dataclass(frozen=True)
 class RelationSpec:
-    """
-    Immutable description of a relation traversal from the current root scope.
-    """
-
     kind: RelationKind
     target_type: str
-    filters: Tuple[BoolExpr, ...] = ()
+    filters: tuple[BoolExpr, ...] = field(default_factory=tuple)
 
 
 @dataclass(frozen=True)
 class RelationExistsExpr(BoolExpr):
     spec: RelationSpec
+
+    def accept(self, visitor: ExprVisitor[T]) -> T:
+        visit = getattr(visitor, "visit_relation_exists")
+        return visit(self)
+
+
+@dataclass(frozen=True, eq=False)
+class RelationCountExpr(ScalarExpr):
+    spec: RelationSpec
+
+    def accept(self, visitor: ExprVisitor[T]) -> T:
+        visit = getattr(visitor, "visit_relation_count")
+        return visit(self)
 
 
 @dataclass(frozen=True)
@@ -29,7 +38,6 @@ class RelationAllExpr(BoolExpr):
     spec: RelationSpec
     condition: BoolExpr
 
-
-@dataclass(frozen=True, eq=False)
-class RelationCountExpr(ScalarExpr):
-    spec: RelationSpec
+    def accept(self, visitor: ExprVisitor[T]) -> T:
+        visit = getattr(visitor, "visit_relation_all")
+        return visit(self)

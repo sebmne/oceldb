@@ -1,16 +1,14 @@
+from __future__ import annotations
+
 from dataclasses import dataclass
 from typing import Optional
 
 from oceldb.core.ocel import OCEL
-from oceldb.dsl import count, event_id, object_id
+from oceldb.dsl import count
 
 
 @dataclass(frozen=True)
 class EventObjectStats:
-    """
-    Structural statistics for the event-object relation.
-    """
-
     avg_objects_per_event: Optional[float]
     min_objects_per_event: Optional[int]
     max_objects_per_event: Optional[int]
@@ -20,28 +18,20 @@ class EventObjectStats:
 
 
 def event_object_stats(ocel: OCEL) -> EventObjectStats:
-    """
-    Return structural statistics for the event-object relation.
-
-    The OCEL-aware first-stage aggregations are expressed through the `tables`
-    API. The resulting DuckDB relations are then aggregated further using the
-    DuckDB relation API, which is the intended boundary for general-purpose
-    second-stage analysis.
-    """
     per_event = (
-        ocel.tables.event_objects()
-        .select(event_id().as_("event_id"))
-        .group_by(event_id())
-        .agg(count().as_("object_count"))
-        .relation()
+        ocel.query()
+        .event_objects()
+        .group_by("ocel_event_id")
+        .agg(count().alias("object_count"))
+        .collect()
     )
 
     per_object = (
-        ocel.tables.event_objects()
-        .select(object_id().as_("object_id"))
-        .group_by(object_id())
-        .agg(count().as_("event_count"))
-        .relation()
+        ocel.query()
+        .event_objects()
+        .group_by("ocel_object_id")
+        .agg(count().alias("event_count"))
+        .collect()
     )
 
     per_event_stats = per_event.aggregate(

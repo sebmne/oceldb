@@ -6,28 +6,28 @@ from oceldb.ast.aggregation import (
     MinAgg,
     SumAgg,
 )
-from oceldb.ast.base import Expr
+from oceldb.ast.base import ScalarExpr
 
 
 def count() -> CountAgg:
     return CountAgg()
 
 
-def count_distinct(expr: Expr) -> CountDistinctAgg:
+def count_distinct(expr: ScalarExpr) -> CountDistinctAgg:
     return CountDistinctAgg(expr)
 
 
-def min_(expr: Expr) -> MinAgg:
+def min_(expr: ScalarExpr) -> MinAgg:
     return MinAgg(expr)
 
 
-def max_(expr: Expr) -> MaxAgg:
+def max_(expr: ScalarExpr) -> MaxAgg:
     return MaxAgg(expr)
 
 
-def sum_(expr: Expr) -> SumAgg:
+def sum_(expr: ScalarExpr) -> SumAgg:
     return SumAgg(expr)
 
 
-def avg(expr: Expr) -> AvgAgg:
+def avg(expr: ScalarExpr) -> AvgAgg:
     return AvgAgg(expr)

@@ -1,17 +1,31 @@
-"""Convert strict OCEL 2.0 SQLite files into the oceldb parquet directory format."""
+"""Convert strict OCEL 2.0 SQLite files into the oceldb parquet format."""
 
-import json
+from __future__ import annotations
+
+import csv
+import sqlite3
 import shutil
+import zipfile
 from datetime import datetime, timezone
 from importlib.metadata import PackageNotFoundError, version
 from pathlib import Path
+from tempfile import TemporaryDirectory
 
 import duckdb
+
+from oceldb.core.metadata import OCELManifest, TableSchema
+from oceldb.io._manifest import CORE_COLUMNS, STORAGE_VERSION, write_manifest
+from oceldb.io._paths import normalize_output_path
 
 try:
     __version__ = version("oceldb")
 except PackageNotFoundError:
     __version__ = "unknown"
+
+_SOURCE_SCHEMA = "ocel_source"
+_CSV_NULL_TOKEN = "__oceldb_null__"
+_EVENT_BASE_COLUMNS = {"ocel_id", "ocel_type", "ocel_time"}
+_OBJECT_BASE_COLUMNS = {"ocel_id", "ocel_type", "ocel_time", "ocel_changed_field"}
 
 
 def convert_sqlite(
@@ -19,338 +33,475 @@ def convert_sqlite(
     target: str | Path,
     *,
     overwrite: bool = False,
+    packaged: bool = False,
 ) -> Path:
     """
     Convert a strict OCEL 2.0 SQLite database into the oceldb parquet format.
-
-    The resulting target directory contains:
-        - event.parquet
-        - object.parquet
-        - event_object.parquet
-        - object_object.parquet
-        - metadata.json
-
-    Conversion semantics:
-        - `event.parquet` is built from the authoritative `db.event` table and
-          enriched with optional type-specific payload from `db.event_<map>`.
-        - `object.parquet` is built from the authoritative `db.object` table and
-          enriched with optional type-specific payload from `db.object_<map>`.
-        - `event_object.parquet` and `object_object.parquet` are copied directly.
-        - All declared event and object types are preserved implicitly through
-          the exported `event.parquet` and `object.parquet`.
-
-    Args:
-        source: Path to the strict OCEL 2.0 SQLite source file.
-        target: Target directory for the converted parquet-based OCEL.
-        overwrite: Whether to remove an existing target directory first.
-
-    Returns:
-        The resolved target directory path.
     """
-    source = Path(source).expanduser().resolve()
-    target = Path(target).expanduser().resolve()
+    source_path = Path(source).expanduser().resolve()
+    target_path = normalize_output_path(
+        Path(target).expanduser().resolve(),
+        packaged=packaged,
+    )
 
-    if not source.exists():
-        raise FileNotFoundError(f"Source SQLite file not found: {source}")
+    if not source_path.exists():
+        raise FileNotFoundError(f"Source SQLite file not found: {source_path}")
 
-    if not source.is_file():
-        raise FileNotFoundError(f"Source must be a SQLite file: {source}")
+    if not source_path.is_file():
+        raise FileNotFoundError(f"Source must be a SQLite file: {source_path}")
 
-    if target.exists():
+    if target_path.exists():
         if not overwrite:
             raise FileExistsError(
-                f"Target directory already exists: {target} (use overwrite=True)"
+                f"Target already exists: {target_path} (use overwrite=True)"
             )
-        shutil.rmtree(target)
+        _remove_target(target_path)
 
-    target.mkdir(parents=True)
+    if packaged:
+        with TemporaryDirectory(prefix="oceldb_convert_") as tmpdir:
+            staging_dir = Path(tmpdir) / "dataset"
+            _convert_to_directory(source_path, staging_dir, packaging="archive")
+            _write_archive(staging_dir, target_path)
+    else:
+        _convert_to_directory(source_path, target_path, packaging="directory")
 
-    with duckdb.connect() as con:
-        con.execute("INSTALL sqlite; LOAD sqlite;")
-        con.execute("SET sqlite_all_varchar=true")
+    return target_path
 
-        src = str(source).replace("'", "''")
-        con.execute(f"ATTACH '{src}' AS db (TYPE sqlite, READ_ONLY)")
 
-        event_types = con.execute("""
-            SELECT ocel_type, ocel_type_map
-            FROM db.event_map_type
-        """).fetchall()
+def _convert_to_directory(
+    source_path: Path,
+    target_dir: Path,
+    *,
+    packaging: str,
+) -> None:
+    target_dir.mkdir(parents=True, exist_ok=False)
 
-        object_types = con.execute("""
-            SELECT ocel_type, ocel_type_map
-            FROM db.object_map_type
-        """).fetchall()
+    try:
+        with sqlite3.connect(source_path) as sqlite_con, duckdb.connect() as con:
+            event_types = _fetch_type_rows(sqlite_con, "event_map_type")
+            object_types = _fetch_type_rows(sqlite_con, "object_map_type")
+            source_schema = _source_schema_map(
+                sqlite_con,
+                event_types=event_types,
+                object_types=object_types,
+            )
 
-        event_object_target = str(target / "event_object.parquet").replace("'", "''")
-        object_object_target = str(target / "object_object.parquet").replace("'", "''")
+            if not _attach_sqlite_source(con, source_path):
+                _stage_source_tables(sqlite_con, con, source_schema)
 
-        con.execute(f"""
-            COPY (
-                SELECT *
-                FROM db.event_object
-            ) TO '{event_object_target}' (FORMAT PARQUET)
-        """)
+            event_schema = _resolve_custom_schema(source_schema, event_types, kind="event")
+            object_schema = _resolve_custom_schema(source_schema, object_types, kind="object")
 
-        con.execute(f"""
-            COPY (
-                SELECT *
-                FROM db.object_object
-            ) TO '{object_object_target}' (FORMAT PARQUET)
-        """)
+            _copy_relation_table(con, "event_object", target_dir / "event_object.parquet")
+            _copy_relation_table(
+                con,
+                "object_object",
+                target_dir / "object_object.parquet",
+            )
 
-        _export_events(con, event_types, target / "event.parquet")
-        _export_objects(con, object_types, target / "object.parquet")
+            _export_entities(
+                con,
+                target_file=target_dir / "event.parquet",
+                base_table="event",
+                base_alias="e",
+                payload_prefix="event",
+                type_rows=event_types,
+                custom_schema=event_schema,
+                base_columns=_EVENT_BASE_COLUMNS,
+            )
+            _export_entities(
+                con,
+                target_file=target_dir / "object.parquet",
+                base_table="object",
+                base_alias="o",
+                payload_prefix="object",
+                type_rows=object_types,
+                custom_schema=object_schema,
+                base_columns=_OBJECT_BASE_COLUMNS,
+            )
 
-    (target / "metadata.json").write_text(
-        json.dumps(
-            {
-                "oceldb_version": __version__,
-                "source": source.name,
-                "converted_at": datetime.now(timezone.utc).isoformat(),
+        manifest = OCELManifest(
+            oceldb_version=__version__,
+            storage_version=STORAGE_VERSION,
+            source=source_path.name,
+            created_at=datetime.now(timezone.utc),
+            packaging=packaging,
+            tables={
+                "event": TableSchema(
+                    name="event",
+                    core_columns=CORE_COLUMNS["event"],
+                    custom_columns=event_schema,
+                ),
+                "object": TableSchema(
+                    name="object",
+                    core_columns=CORE_COLUMNS["object"],
+                    custom_columns=object_schema,
+                ),
+                "event_object": TableSchema(
+                    name="event_object",
+                    core_columns=CORE_COLUMNS["event_object"],
+                ),
+                "object_object": TableSchema(
+                    name="object_object",
+                    core_columns=CORE_COLUMNS["object_object"],
+                ),
             },
-            indent=2,
-        ),
-        encoding="utf-8",
-    )
-
-    return target
-
-
-def _export_events(
-    con: duckdb.DuckDBPyConnection,
-    event_types: list[tuple[str, str]],
-    target_file: Path,
-) -> None:
-    """
-    Export the unified event table.
-
-    The exported table is built from the authoritative base `db.event` table and
-    left-joined with the corresponding type-specific payload table for each
-    declared event type.
-
-    The resulting parquet schema is:
-        - ocel_id
-        - ocel_type
-        - ocel_time
-        - attributes
-
-    Args:
-        con: Open DuckDB connection with the SQLite database attached as `db`.
-        event_types: Pairs of `(ocel_type, ocel_type_map)` from `db.event_map_type`.
-        target_file: Output parquet file path.
-    """
-    queries = [
-        _build_event_select(
-            con=con,
-            type_name=type_name,
-            payload_table=f"event_{type_map}",
         )
-        for type_name, type_map in event_types
+        write_manifest(target_dir / "manifest.json", manifest)
+    except Exception:
+        if target_dir.exists():
+            _remove_target(target_dir)
+        raise
+
+
+def _resolve_custom_schema(
+    source_schema: dict[str, dict[str, str]],
+    type_rows: list[tuple[str, str]],
+    *,
+    kind: str,
+) -> dict[str, str]:
+    discovered: dict[str, list[str]] = {}
+
+    for _, type_map in type_rows:
+        table_name = f'{kind}_{type_map}'
+        payload_columns = source_schema[table_name]
+        for name, sql_type in payload_columns.items():
+            if name in _base_columns_for_kind(kind):
+                continue
+            discovered.setdefault(name, []).append(_normalize_type(sql_type))
+
+    return {
+        name: _resolve_common_type(types)
+        for name, types in sorted(discovered.items())
+    }
+
+
+def _export_entities(
+    con: duckdb.DuckDBPyConnection,
+    *,
+    target_file: Path,
+    base_table: str,
+    base_alias: str,
+    payload_prefix: str,
+    type_rows: list[tuple[str, str]],
+    custom_schema: dict[str, str],
+    base_columns: set[str],
+) -> None:
+    queries = [
+        _build_entity_select(
+            con,
+            base_table=base_table,
+            base_alias=base_alias,
+            payload_table=f"{payload_prefix}_{type_map}",
+            type_name=type_name,
+            custom_schema=custom_schema,
+            base_columns=base_columns,
+        )
+        for type_name, type_map in type_rows
     ]
 
     if queries:
         sql = " UNION ALL ".join(queries)
     else:
-        sql = """
+        null_columns = ", ".join(
+            f"CAST(NULL AS {sql_type}) AS \"{name}\""
+            for name, sql_type in custom_schema.items()
+        )
+        sql = f"""
             SELECT
-                NULL AS ocel_id,
-                NULL AS ocel_type,
-                NULL AS ocel_time,
-                CAST('{}' AS VARCHAR) AS attributes
+                CAST(NULL AS VARCHAR) AS ocel_id,
+                CAST(NULL AS VARCHAR) AS ocel_type,
+                CAST(NULL AS TIMESTAMP) AS ocel_time
+                {", CAST(NULL AS VARCHAR) AS ocel_changed_field" if base_table == "object" else ""}
+                {f", {null_columns}" if null_columns else ""}
             WHERE FALSE
         """
 
-    trgt = str(target_file).replace("'", "''")
-    con.execute(f"COPY ({sql}) TO '{trgt}' (FORMAT PARQUET)")
+    target = str(target_file).replace("'", "''")
+    con.execute(f"COPY ({sql}) TO '{target}' (FORMAT PARQUET)")
 
 
-def _export_objects(
+def _build_entity_select(
     con: duckdb.DuckDBPyConnection,
-    object_types: list[tuple[str, str]],
+    *,
+    base_table: str,
+    base_alias: str,
+    payload_table: str,
+    type_name: str,
+    custom_schema: dict[str, str],
+    base_columns: set[str],
+) -> str:
+    payload_columns = _table_columns(con, payload_table)
+    escaped_type = type_name.replace("'", "''")
+
+    select_parts = [
+        f'{base_alias}."ocel_id" AS ocel_id',
+        f'{base_alias}."ocel_type" AS ocel_type',
+        _temporal_column_sql(payload_columns, "ocel_time"),
+    ]
+
+    if base_table == "object":
+        if "ocel_changed_field" in payload_columns:
+            select_parts.append('p."ocel_changed_field" AS ocel_changed_field')
+        else:
+            select_parts.append('CAST(NULL AS VARCHAR) AS ocel_changed_field')
+
+    for name, resolved_type in custom_schema.items():
+        if name in payload_columns and name not in base_columns:
+            select_parts.append(
+                f'TRY_CAST(p."{name}" AS {resolved_type}) AS "{name}"'
+            )
+        else:
+            select_parts.append(f'CAST(NULL AS {resolved_type}) AS "{name}"')
+
+    select_sql = ",\n            ".join(select_parts)
+
+    return f"""
+        SELECT
+            {select_sql}
+        FROM {_qualified_source_table(base_table)} {base_alias}
+        LEFT JOIN {_qualified_source_table(payload_table)} p
+          ON {base_alias}."ocel_id" = p."ocel_id"
+        WHERE {base_alias}."ocel_type" = '{escaped_type}'
+    """
+
+
+def _copy_relation_table(
+    con: duckdb.DuckDBPyConnection,
+    table_name: str,
     target_file: Path,
 ) -> None:
-    """
-    Export the unified object table.
-
-    The exported table is built from the authoritative base `db.object` table and
-    left-joined with the corresponding type-specific payload table for each
-    declared object type.
-
-    The resulting parquet schema is:
-        - ocel_id
-        - ocel_type
-        - ocel_time
-        - ocel_changed_field
-        - attributes
-
-    Objects without type-specific payload rows are still preserved because they
-    exist in the base `db.object` table.
-
-    Args:
-        con: Open DuckDB connection with the SQLite database attached as `db`.
-        object_types: Pairs of `(ocel_type, ocel_type_map)` from `db.object_map_type`.
-        target_file: Output parquet file path.
-    """
-    queries = [
-        _build_object_select(
-            con=con,
-            type_name=type_name,
-            payload_table=f"object_{type_map}",
-        )
-        for type_name, type_map in object_types
-    ]
-
-    if queries:
-        sql = " UNION ALL ".join(queries)
-    else:
-        sql = """
-            SELECT
-                NULL AS ocel_id,
-                NULL AS ocel_type,
-                NULL AS ocel_time,
-                NULL AS ocel_changed_field,
-                CAST('{}' AS VARCHAR) AS attributes
-            WHERE FALSE
-        """
-
-    trgt = str(target_file).replace("'", "''")
-    con.execute(f"COPY ({sql}) TO '{trgt}' (FORMAT PARQUET)")
-
-
-def _build_event_select(
-    con: duckdb.DuckDBPyConnection,
-    type_name: str,
-    payload_table: str,
-) -> str:
-    """
-    Build the SELECT statement exporting one event type.
-
-    Args:
-        con: Open DuckDB connection with the SQLite database attached as `db`.
-        type_name: The declared OCEL event type name.
-        payload_table: The corresponding type-specific payload table name.
-
-    Returns:
-        A SQL SELECT statement returning event rows of the given type with
-        optional event time and packed custom attributes.
-    """
-    payload_columns = _table_columns(con, payload_table)
-    attribute_columns = [
-        col
-        for col in payload_columns
-        if col not in {"ocel_id", "ocel_type", "ocel_time", "ocel_changed_field"}
-    ]
-
-    attributes_sql = _attributes_sql(attribute_columns, alias="p")
-    escaped_type = type_name.replace("'", "''")
-
-    time_sql = (
-        'TRY_CAST(p."ocel_time" AS TIMESTAMP) AS ocel_time'
-        if "ocel_time" in payload_columns
-        else "CAST(NULL AS TIMESTAMP) AS ocel_time"
-    )
-
-    return f"""
-        SELECT
-            e."ocel_id" AS ocel_id,
-            e."ocel_type" AS ocel_type,
-            {time_sql},
-            {attributes_sql} AS attributes
-        FROM db.event e
-        LEFT JOIN db."{payload_table}" p
-          ON e."ocel_id" = p."ocel_id"
-        WHERE e."ocel_type" = '{escaped_type}'
-    """
-
-
-def _build_object_select(
-    con: duckdb.DuckDBPyConnection,
-    type_name: str,
-    payload_table: str,
-) -> str:
-    """
-    Build the SELECT statement exporting one object type.
-
-    Args:
-        con: Open DuckDB connection with the SQLite database attached as `db`.
-        type_name: The declared OCEL object type name.
-        payload_table: The corresponding type-specific payload table name.
-
-    Returns:
-        A SQL SELECT statement returning object rows of the given type with
-        optional temporal/change metadata and packed custom attributes.
-    """
-    payload_columns = _table_columns(con, payload_table)
-    attribute_columns = [
-        col
-        for col in payload_columns
-        if col not in {"ocel_id", "ocel_type", "ocel_time", "ocel_changed_field"}
-    ]
-
-    attributes_sql = _attributes_sql(attribute_columns, alias="p")
-    escaped_type = type_name.replace("'", "''")
-
-    time_sql = (
-        'TRY_CAST(p."ocel_time" AS TIMESTAMP) AS ocel_time'
-        if "ocel_time" in payload_columns
-        else "CAST(NULL AS TIMESTAMP) AS ocel_time"
-    )
-
-    changed_field_sql = (
-        'p."ocel_changed_field" AS ocel_changed_field'
-        if "ocel_changed_field" in payload_columns
-        else "NULL AS ocel_changed_field"
-    )
-
-    return f"""
-        SELECT
-            o."ocel_id" AS ocel_id,
-            o."ocel_type" AS ocel_type,
-            {time_sql},
-            {changed_field_sql},
-            {attributes_sql} AS attributes
-        FROM db.object o
-        LEFT JOIN db."{payload_table}" p
-          ON o."ocel_id" = p."ocel_id"
-        WHERE o."ocel_type" = '{escaped_type}'
-    """
+    target = str(target_file).replace("'", "''")
+    con.execute(f"""
+        COPY (
+            SELECT *
+            FROM {_qualified_source_table(table_name)}
+        ) TO '{target}' (FORMAT PARQUET)
+    """)
 
 
 def _table_columns(
     con: duckdb.DuckDBPyConnection,
     table_name: str,
+) -> dict[str, str]:
+    return {
+        row[0]: row[1]
+        for row in con.execute(
+            f"DESCRIBE SELECT * FROM {_qualified_source_table(table_name)}"
+        ).fetchall()
+    }
+
+
+def _fetch_type_rows(
+    sqlite_con: sqlite3.Connection,
+    table_name: str,
+) -> list[tuple[str, str]]:
+    rows = sqlite_con.execute(f"""
+        SELECT ocel_type, ocel_type_map
+        FROM {_quote_identifier(table_name)}
+        ORDER BY ocel_type
+    """).fetchall()
+    return [(str(type_name), str(type_map)) for type_name, type_map in rows]
+
+
+def _source_schema_map(
+    sqlite_con: sqlite3.Connection,
+    *,
+    event_types: list[tuple[str, str]],
+    object_types: list[tuple[str, str]],
+) -> dict[str, dict[str, str]]:
+    return {
+        table_name: _sqlite_table_columns(sqlite_con, table_name)
+        for table_name in _required_source_tables(event_types, object_types)
+    }
+
+
+def _required_source_tables(
+    event_types: list[tuple[str, str]],
+    object_types: list[tuple[str, str]],
 ) -> list[str]:
-    """
-    Return the column names of a SQLite table attached as `db`.
-
-    Args:
-        con: Open DuckDB connection with the SQLite database attached as `db`.
-        table_name: Name of the table inside the attached SQLite database.
-
-    Returns:
-        A list of column names in table order.
-    """
     return [
-        row[0]
-        for row in con.execute(f'DESCRIBE SELECT * FROM db."{table_name}"').fetchall()
+        "event",
+        "object",
+        "event_object",
+        "object_object",
+        *[f"event_{type_map}" for _, type_map in event_types],
+        *[f"object_{type_map}" for _, type_map in object_types],
     ]
 
 
-def _attributes_sql(columns: list[str], *, alias: str) -> str:
-    """
-    Build the SQL expression packing custom columns into a JSON string.
+def _attach_sqlite_source(
+    con: duckdb.DuckDBPyConnection,
+    source_path: Path,
+) -> bool:
+    for extension_name in ("sqlite", "sqlite_scanner"):
+        try:
+            con.execute(f"LOAD {extension_name}")
+            escaped_source = str(source_path).replace("'", "''")
+            con.execute(
+                f"ATTACH '{escaped_source}' AS {_SOURCE_SCHEMA} "
+                "(TYPE sqlite, READ_ONLY)"
+            )
+            return True
+        except duckdb.Error:
+            continue
 
-    Args:
-        columns: Custom attribute column names to include.
-        alias: SQL alias of the payload table.
+    return False
 
-    Returns:
-        A SQL expression yielding a JSON VARCHAR object. If `columns` is empty,
-        returns an empty JSON object.
-    """
-    if not columns:
-        return "CAST('{}' AS VARCHAR)"
 
-    parts = [f"'{col}': {alias}.\"{col}\"" for col in columns]
-    return f"CAST(to_json({{{', '.join(parts)}}}) AS VARCHAR)"
+def _stage_source_tables(
+    sqlite_con: sqlite3.Connection,
+    con: duckdb.DuckDBPyConnection,
+    source_schema: dict[str, dict[str, str]],
+) -> None:
+    con.execute(f'CREATE SCHEMA "{_SOURCE_SCHEMA}"')
+
+    with TemporaryDirectory(prefix="oceldb_sqlite_stage_") as tmpdir:
+        staging_dir = Path(tmpdir)
+        for table_name, columns in source_schema.items():
+            staging_file = staging_dir / f"{table_name}.tsv"
+            _write_sqlite_table_tsv(
+                sqlite_con,
+                table_name,
+                columns=tuple(columns),
+                target_file=staging_file,
+            )
+            _import_staged_table(con, table_name, staging_file)
+
+
+def _write_sqlite_table_tsv(
+    sqlite_con: sqlite3.Connection,
+    table_name: str,
+    *,
+    columns: tuple[str, ...],
+    target_file: Path,
+) -> None:
+    select_sql = f"SELECT * FROM {_quote_identifier(table_name)}"
+    cursor = sqlite_con.execute(select_sql)
+
+    with target_file.open("w", encoding="utf-8", newline="") as handle:
+        writer = csv.writer(
+            handle,
+            delimiter="\t",
+            quotechar='"',
+            quoting=csv.QUOTE_MINIMAL,
+        )
+        writer.writerow(columns)
+        while rows := cursor.fetchmany(50_000):
+            writer.writerows(_staged_csv_rows(rows))
+
+
+def _staged_csv_rows(rows: list[tuple[object, ...]]) -> list[tuple[object, ...]]:
+    return [
+        tuple(
+            _CSV_NULL_TOKEN if value is None else _normalize_sqlite_value(value)
+            for value in row
+        )
+        for row in rows
+    ]
+
+
+def _import_staged_table(
+    con: duckdb.DuckDBPyConnection,
+    table_name: str,
+    source_file: Path,
+) -> None:
+    escaped_source = str(source_file).replace("'", "''")
+    escaped_null = _CSV_NULL_TOKEN.replace("'", "''")
+    con.execute(f"""
+        CREATE TABLE {_qualified_source_table(table_name)} AS
+        SELECT *
+        FROM read_csv_auto(
+            '{escaped_source}',
+            delim = '\t',
+            header = true,
+            all_varchar = true,
+            nullstr = '{escaped_null}'
+        )
+    """)
+
+
+def _sqlite_table_columns(
+    sqlite_con: sqlite3.Connection,
+    table_name: str,
+) -> dict[str, str]:
+    rows = sqlite_con.execute(
+        f"PRAGMA table_info({_quote_identifier(table_name)})"
+    ).fetchall()
+    if not rows:
+        raise FileNotFoundError(f"Missing SQLite table: {table_name}")
+
+    return {
+        str(row[1]): str(row[2] or "VARCHAR")
+        for row in rows
+    }
+
+
+def _normalize_sqlite_value(value: object) -> object:
+    if isinstance(value, bytes):
+        return value.decode("utf-8")
+    return value
+
+
+def _qualified_source_table(table_name: str) -> str:
+    return f'{_quote_identifier(_SOURCE_SCHEMA)}.{_quote_identifier(table_name)}'
+
+
+def _quote_identifier(identifier: str) -> str:
+    escaped = identifier.replace('"', '""')
+    return f'"{escaped}"'
+
+
+def _temporal_column_sql(payload_columns: dict[str, str], name: str) -> str:
+    if name not in payload_columns:
+        return f"CAST(NULL AS TIMESTAMP) AS {name}"
+    return f'TRY_CAST(p."{name}" AS TIMESTAMP) AS {name}'
+
+
+def _normalize_type(sql_type: str) -> str:
+    upper = sql_type.upper()
+
+    if any(token in upper for token in ("TINYINT", "SMALLINT", "INTEGER", "BIGINT", "HUGEINT")):
+        return "BIGINT"
+    if any(token in upper for token in ("REAL", "FLOAT", "DOUBLE", "DECIMAL", "NUMERIC")):
+        return "DOUBLE"
+    if "TIMESTAMP" in upper:
+        return "TIMESTAMP"
+    if upper == "DATE":
+        return "DATE"
+    if upper == "BOOLEAN":
+        return "BOOLEAN"
+    return "VARCHAR"
+
+
+def _resolve_common_type(types: list[str]) -> str:
+    unique = sorted(set(types))
+    if len(unique) == 1:
+        return unique[0]
+    if set(unique) <= {"BIGINT", "DOUBLE"}:
+        return "DOUBLE"
+    if set(unique) <= {"DATE", "TIMESTAMP"}:
+        return "TIMESTAMP"
+    return "VARCHAR"
+
+
+def _base_columns_for_kind(kind: str) -> set[str]:
+    if kind == "event":
+        return _EVENT_BASE_COLUMNS
+    if kind == "object":
+        return _OBJECT_BASE_COLUMNS
+    raise TypeError(f"Unsupported entity kind: {kind!r}")
+
+
+def _write_archive(source_dir: Path, target_file: Path) -> None:
+    target_file.parent.mkdir(parents=True, exist_ok=True)
+    with zipfile.ZipFile(target_file, "w", compression=zipfile.ZIP_DEFLATED) as archive:
+        for child in sorted(source_dir.iterdir()):
+            archive.write(child, arcname=child.name)
+
+
+def _remove_target(target: Path) -> None:
+    if target.is_dir():
+        shutil.rmtree(target)
+    else:
+        target.unlink()

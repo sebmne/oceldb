@@ -1,7 +1,7 @@
 [project]
 name = "oceldb"
-version = "0.2.0"
-description = "Add your description here"
+version = "0.3.0"
+description = "DuckDB-backed OCEL 2.0 storage and lazy query DSL"
 authors = [{name = "Sebastian Menne", email = "sebastian.menne@rwth-aachen.de"}]
 license = {text = "MIT"}
 readme = "README.md"

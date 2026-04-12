@@ -1,14 +1,18 @@
-from dataclasses import dataclass
-from typing import Optional
+from __future__ import annotations
 
-from oceldb.ast.base import ScalarExpr
+from dataclasses import dataclass
+
+from oceldb.ast.base import ExprVisitor, ScalarExpr, T
 
 
 @dataclass(frozen=True, eq=False)
-class FieldExpr(ScalarExpr):
+class ColumnExpr(ScalarExpr):
     """
-    Scalar expression representing a fixed field in the current scope.
+    Scalar expression referencing a typed column in the current query scope.
     """
 
     name: str
-    cast: Optional[str] = None
+
+    def accept(self, visitor: ExprVisitor[T]) -> T:
+        visit = getattr(visitor, "visit_column")
+        return visit(self)

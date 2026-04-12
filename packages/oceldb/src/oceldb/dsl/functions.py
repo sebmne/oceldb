@@ -1,14 +1,12 @@
-from typing import Any, Iterable
+from __future__ import annotations
 
-from oceldb.ast.base import ScalarExpr
-from oceldb.ast.function import InExpr
+from typing import Any
+
+from oceldb.ast.base import LiteralExpr
 
 
-def in_(expr: ScalarExpr, values: Iterable[Any]) -> InExpr:
+def lit(value: Any) -> LiteralExpr:
     """
-    Build an IN predicate.
+    Build a literal expression.
     """
-    values_tuple = tuple(values)
-    if not values_tuple:
-        raise ValueError("IN predicate requires at least one value")
-    return InExpr(expr=expr, values=values_tuple)
+    return LiteralExpr(value=value)

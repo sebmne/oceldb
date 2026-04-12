@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 from dataclasses import dataclass
 from typing import Literal
 
@@ -11,7 +13,7 @@ class CompileContext:
     kind: ExprScopeKind
 
     def table(self, name: str) -> str:
-        return f"{self.schema}.{name}"
+        return f'"{self.schema}"."{name}"'
 
     def with_alias(
         self,
