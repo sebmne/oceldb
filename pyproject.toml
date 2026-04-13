@@ -1,18 +1,31 @@
 [project]
-name = "oceldb-dev"
-version = "0.0.0"
-requires-python = ">=3.11"
+name = "oceldb"
+version = "0.3.0"
+description = "DuckDB-backed OCEL 2.0 storage and lazy query DSL"
+authors = [{name = "Sebastian Menne", email = "sebastian.menne@rwth-aachen.de"}]
+license = {text = "MIT"}
+readme = "README.md"
+requires-python = ">=3.13"
 dependencies = [
-  "oceldb",
-  "oceldb-ui",
+    "duckdb>=1.5.1",
 ]
 
-[tool.uv.sources]
-oceldb = { workspace = true }
-oceldb-ui = { workspace = true }
-
-[tool.uv.workspace]
-members = [
-  "packages/oceldb",
-  "packages/oceldb-ui",
+[dependency-groups]
+dev = [
+    "basedpyright>=1.31.0",
+    "pytest>=9.0.3",
+    "ruff>=0.15.10",
 ]
+
+[tool.pytest.ini_options]
+pythonpath = ["src"]
+testpaths = ["tests"]
+
+[tool.basedpyright]
+include = ["src"]
+exclude = ["tests"]
+extraPaths = ["src"]
+pythonVersion = "3.13"
+typeCheckingMode = "strict"
+reportMissingTypeStubs = false
+reportPrivateUsage = false

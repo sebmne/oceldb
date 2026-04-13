@@ -1,0 +1,30 @@
+{
+  "format": "oceldb",
+  "storage_version": "2",
+  "oceldb_version": "0.0.0",
+  "source": "smoke-example",
+  "created_at": "2026-04-12T21:28:29.396213+00:00",
+  "tables": {
+    "event": {
+      "custom_columns": {
+        "total_price": "DOUBLE",
+        "method": "VARCHAR"
+      }
+    },
+    "object": {
+      "custom_columns": {}
+    },
+    "object_change": {
+      "custom_columns": {
+        "status": "VARCHAR",
+        "name": "VARCHAR"
+      }
+    },
+    "event_object": {
+      "custom_columns": {}
+    },
+    "object_object": {
+      "custom_columns": {}
+    }
+  }
+}
