@@ -1,7 +1,7 @@
 {
   "format": "oceldb",
-  "storage_version": "2",
-  "oceldb_version": "0.2.0",
+  "storage_version": "3",
+  "oceldb_version": "0.3.0",
   "source": "atlas-fulfillment.sqlite",
   "created_at": "2026-04-12T21:28:34.458978+00:00",
   "tables": {
@@ -54,6 +54,115 @@
         "shortage_reason": "VARCHAR",
         "supplier": "VARCHAR",
         "warehouse": "VARCHAR"
+      },
+      "type_attributes": {
+        "Approve Return": [
+          "resolution_path"
+        ],
+        "Backorder Item": [
+          "expected_delay_days",
+          "shortage_reason"
+        ],
+        "Clear Fraud Review": [
+          "decision",
+          "review_minutes"
+        ],
+        "Close Order": [
+          "cycle_days",
+          "final_status"
+        ],
+        "Create Invoice": [
+          "gross_amount",
+          "payment_terms_days"
+        ],
+        "Create Shipment": [
+          "carrier",
+          "package_count",
+          "service_level"
+        ],
+        "Create Supplier Order": [
+          "lead_time_days",
+          "supplier"
+        ],
+        "Customs Hold": [
+          "extra_delay_days",
+          "hold_reason"
+        ],
+        "Customs Release": [
+          "clearance_channel"
+        ],
+        "Deliver Shipment": [
+          "delivery_days",
+          "on_time"
+        ],
+        "Delivery Attempt Failed": [
+          "attempt_no",
+          "reason"
+        ],
+        "Dispatch Shipment": [
+          "hub",
+          "lane"
+        ],
+        "Inspect Return": [
+          "disposition",
+          "recoverable_value"
+        ],
+        "Issue Refund": [
+          "refund_amount",
+          "refund_type"
+        ],
+        "Pack Package": [
+          "carrier",
+          "package_items",
+          "package_weight"
+        ],
+        "Pick Item": [
+          "picker_wave",
+          "warehouse"
+        ],
+        "Place Order": [
+          "channel",
+          "country",
+          "item_count",
+          "order_value",
+          "priority"
+        ],
+        "Receive Payment": [
+          "amount",
+          "days_to_pay",
+          "method"
+        ],
+        "Receive Return": [
+          "days_after_delivery"
+        ],
+        "Receive Supplier Delivery": [
+          "received_quantity",
+          "supplier"
+        ],
+        "Reject Order": [
+          "reason"
+        ],
+        "Request Return": [
+          "reason",
+          "requested_quantity"
+        ],
+        "Reserve Inventory": [
+          "reservation_status",
+          "warehouse"
+        ],
+        "Restock Item": [
+          "warehouse"
+        ],
+        "Scrap Item": [
+          "scrap_reason"
+        ],
+        "Send Payment Reminder": [
+          "reminder_level"
+        ],
+        "Start Fraud Review": [
+          "review_queue",
+          "risk_bucket"
+        ]
       }
     },
     "object": {
@@ -95,6 +204,65 @@
         "tier": "VARCHAR",
         "unit_price": "DOUBLE",
         "zone": "VARCHAR"
+      },
+      "type_attributes": {
+        "customer": [
+          "region",
+          "segment",
+          "tier"
+        ],
+        "invoice": [
+          "currency",
+          "gross_amount",
+          "payment_terms_days",
+          "status"
+        ],
+        "order": [
+          "channel",
+          "country",
+          "order_value",
+          "payment_method",
+          "payment_terms_days",
+          "priority",
+          "risk_bucket",
+          "status"
+        ],
+        "order_item": [
+          "category",
+          "fulfillment_mode",
+          "quantity",
+          "sku",
+          "unit_price"
+        ],
+        "package": [
+          "carrier",
+          "package_weight",
+          "service_level",
+          "zone"
+        ],
+        "payment": [
+          "amount",
+          "method",
+          "status"
+        ],
+        "return_case": [
+          "reason",
+          "refundable_amount",
+          "resolution"
+        ],
+        "shipment": [
+          "attempt_count",
+          "carrier",
+          "final_status",
+          "had_customs_hold",
+          "is_international",
+          "lane"
+        ],
+        "supplier_order": [
+          "lead_time_days",
+          "status",
+          "supplier"
+        ]
       }
     },
     "event_object": {

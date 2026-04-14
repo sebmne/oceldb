@@ -4,8 +4,8 @@ from oceldb.dsl import (
     abs_,
     asc,
     avg,
-    col,
     coalesce,
+    col,
     cooccurs_with,
     count,
     count_distinct,
@@ -16,12 +16,11 @@ from oceldb.dsl import (
     lit,
     max_,
     min_,
-    row_number,
     round_,
+    row_number,
     sum_,
     when,
 )
-from oceldb.io import convert_sqlite
 
 __all__ = [
     "OCEL",
@@ -33,7 +32,6 @@ __all__ = [
     "col",
     "coalesce",
     "cooccurs_with",
-    "convert_sqlite",
     "count",
     "count_distinct",
     "desc",

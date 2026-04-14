@@ -64,6 +64,7 @@ It should expose exactly these roots:
 - `ocel.query.objects(*object_types: str) -> ObjectRows`
 - `ocel.query.object_changes(*object_types: str) -> ObjectChangeRows`
 - `ocel.query.object_states(*object_types: str) -> ObjectStateSeed`
+- `ocel.query.event_occurrences(*object_types: str) -> EventOccurrenceRows`
 - `ocel.query.event_objects() -> EventObjectRows`
 - `ocel.query.object_objects() -> ObjectObjectRows`
 
@@ -83,6 +84,7 @@ The target public query types are:
 - `ObjectChangeRows`
 - `ObjectStateSeed`
 - `ObjectStateRows`
+- `EventOccurrenceRows`
 - `EventObjectRows`
 - `ObjectObjectRows`
 - `SelectedRows`
@@ -105,6 +107,15 @@ Core builders:
 - `avg(expr)`
 - `asc(expr_or_name)`
 - `desc(expr_or_name)`
+- `row_number()`
+
+Column-reference convention:
+
+- accept bare strings only as shorthand for simple top-level column references
+  in query methods such as `select(...)`, `group_by(...)`, and `sort(...)`
+- require `col(...)` once a column participates in an expression such as
+  comparison, arithmetic, string operations, datetime operations, conditional
+  expressions, relation predicates, or window expressions
 
 Relation builders:
 
@@ -166,6 +177,23 @@ It does not expose `ocel_changed_field`.
 Objects without any history row must still appear in `ObjectStateRows`, with
 `ocel_time = NULL` and projected attributes `NULL`.
 
+### Event Occurrence Queries
+
+`event_occurrences(...)` returns one row per event-object incidence for the
+selected object types.
+
+Each row contains:
+
+- `ocel_event_id`
+- `ocel_event_type`
+- `ocel_event_time`
+- `ocel_object_id`
+- `ocel_object_type`
+
+This root exists for sequence-oriented analysis. It is the intended basis for
+window expressions such as `row_number`, `lag`, and `lead`, and for process
+projections such as projected directly-follows graphs.
+
 ### Raw Relation Queries
 
 `event_objects()` exposes the raw event-to-object relation table.
@@ -221,7 +249,7 @@ ocel.query.events("Ship Order").where(
 
 ### Row Queries
 
-`EventRows`, `ObjectRows`, `ObjectChangeRows`, `ObjectStateRows`
+`EventRows`, `ObjectRows`, `ObjectChangeRows`, `ObjectStateRows`, `EventOccurrenceRows`
 
 - `where(*predicates: BoolExpr) -> Self`
 - `with_columns(*exprs, **named_exprs) -> Self`
@@ -253,6 +281,7 @@ This applies to:
 It does not apply to:
 
 - `ObjectChangeRows`
+- `EventOccurrenceRows`
 - `SelectedRows`
 - `AggregatedRows`
 - raw relation queries
