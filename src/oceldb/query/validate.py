@@ -7,19 +7,25 @@ from oceldb.ast.aggregation import AvgAgg, CountAgg, CountDistinctAgg, MaxAgg, M
 from oceldb.ast.base import (
     AliasExpr,
     AndExpr,
+    BinaryOpExpr,
+    CaseExpr,
     CastExpr,
     CompareExpr,
     Expr,
     ExprVisitor,
+    FunctionExpr,
     InExpr,
     LiteralExpr,
     NotExpr,
     OrExpr,
+    PredicateFunctionExpr,
     SortExpr,
     UnaryPredicate,
+    WindowFunctionExpr,
 )
 from oceldb.ast.field import ColumnExpr
 from oceldb.ast.relation import RelationAllExpr, RelationCountExpr, RelationExistsExpr, RelationKind, RelationSpec
+from oceldb.core.ocel import ocel_available_columns
 from oceldb.query.plan import (
     DistinctPlan,
     ExtendPlan,
@@ -28,6 +34,7 @@ from oceldb.query.plan import (
     HavingPlan,
     LimitPlan,
     ProjectPlan,
+    RenamePlan,
     QueryPlan,
     QueryPlanNode,
     SortPlan,
@@ -83,6 +90,10 @@ def _validate_node(
                 validate_expr(expr, child.columns, child.current_kind, query)
             return
 
+        case RenamePlan(input=inner):
+            _validate_node(inner, query, has_parent=True)
+            return
+
         case GroupPlan(input=inner, keys=keys, aggregations=aggregations):
             _validate_node(inner, query, has_parent=True)
             child = analyze_node(inner, query, has_parent=True)
@@ -131,7 +142,7 @@ def validate_expr(
 
 def _relation_target_kind(kind: RelationKind, current_kind: ExprScopeKind) -> ExprScopeKind:
     match kind:
-        case "related" | "linked":
+        case "cooccurs_with" | "linked":
             return "object_state" if current_kind == "object_state" else "object"
         case "has_event":
             return "event"
@@ -161,6 +172,45 @@ class ValidationVisitor(ExprVisitor[None]):
 
     def visit_cast(self, expr: CastExpr) -> None:
         self.visit(expr.expr)
+
+    def visit_binary_op(self, expr: BinaryOpExpr) -> None:
+        if isinstance(expr.left, Expr):
+            self.visit(expr.left)
+        if isinstance(expr.right, Expr):
+            self.visit(expr.right)
+
+    def visit_scalar_function(self, expr: FunctionExpr) -> None:
+        for value in expr.args:
+            if isinstance(value, Expr):
+                self.visit(value)
+
+    def visit_predicate_function(self, expr: PredicateFunctionExpr) -> None:
+        for value in expr.args:
+            if isinstance(value, Expr):
+                self.visit(value)
+
+    def visit_case(self, expr: CaseExpr) -> None:
+        for condition, value in expr.branches:
+            self.visit(condition)
+            if isinstance(value, Expr):
+                self.visit(value)
+        if isinstance(expr.default, Expr):
+            self.visit(expr.default)
+
+    def visit_window_function(self, expr: WindowFunctionExpr) -> None:
+        if expr.window is None:
+            raise ValueError(
+                f"Window function {expr.name}(...) requires .over(...)"
+            )
+        for value in expr.args:
+            if isinstance(value, Expr):
+                self.visit(value)
+        if isinstance(expr.default, Expr):
+            self.visit(expr.default)
+        for value in expr.window.partition_by:
+            self.visit(value)
+        for ordering in expr.window.order_by:
+            validate_sort_expr(ordering, self.columns, self.current_kind, self.query)
 
     def visit_compare(self, expr: CompareExpr) -> None:
         self.visit(expr.left)
@@ -214,7 +264,11 @@ class ValidationVisitor(ExprVisitor[None]):
     def visit_relation_all(self, expr: RelationAllExpr) -> None:
         self._validate_relation(expr.spec)
         target_kind = _relation_target_kind(expr.spec.kind, self.current_kind)
-        target_columns = self.query.ocel._available_columns(target_kind)
+        target_columns = ocel_available_columns(
+            self.query.ocel,
+            target_kind,
+            selected_types=(expr.spec.target_type,),
+        )
         nested = ValidationVisitor(target_columns, target_kind, self.query)
         nested.visit(expr.condition)
 
@@ -232,7 +286,11 @@ class ValidationVisitor(ExprVisitor[None]):
             )
 
         target_kind = _relation_target_kind(spec.kind, self.current_kind)
-        target_columns = self.query.ocel._available_columns(target_kind)
+        target_columns = ocel_available_columns(
+            self.query.ocel,
+            target_kind,
+            selected_types=(spec.target_type,),
+        )
         nested = ValidationVisitor(target_columns, target_kind, self.query)
         for expr in spec.filters:
             nested.visit(expr)

@@ -58,6 +58,9 @@ with OCEL.read("running-example") as ocel:
 The stable handle is `OCEL`.
 
 ```python
+from oceldb.discovery import ocdfg
+from oceldb.inspect import overview
+
 with OCEL.read("my-log") as ocel:
     ocel.query.events(...)
     ocel.query.objects(...)
@@ -65,9 +68,15 @@ with OCEL.read("my-log") as ocel:
     ocel.query.object_states(...).as_of("2024-01-01")
     ocel.query.object_changes(...)
 
-    ocel.inspect.overview()
+    overview(ocel)
+    ocdfg(ocel, "order")
     ocel.sql("SELECT * FROM event LIMIT 5")
 ```
+
+Inspection and discovery are separate modules:
+
+- `oceldb.inspect` for direct structural facts such as types, attributes, and log overview
+- `oceldb.discovery` for mined artifacts such as OC-DFGs
 
 Important distinction:
 

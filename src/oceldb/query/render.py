@@ -2,6 +2,10 @@ from __future__ import annotations
 
 from typing import assert_never
 
+from oceldb.core.ocel import (
+    ocel_available_columns,
+    logical_table_sql,
+)
 from oceldb.query.plan import (
     DistinctPlan,
     ExtendPlan,
@@ -10,6 +14,7 @@ from oceldb.query.plan import (
     HavingPlan,
     LimitPlan,
     ProjectPlan,
+    RenamePlan,
     QueryPlan,
     QueryPlanNode,
     SortPlan,
@@ -24,7 +29,7 @@ from oceldb.query.plan import (
 from oceldb.query.schema import analyze_node
 from oceldb.query.validate import validate_query
 from oceldb.sql.context import CompileContext, ExprScopeKind, render_object_state_source
-from oceldb.sql.render_expr import render_compare_value, render_expr, render_order_expr
+from oceldb.sql.render_expr import quote_ident, render_compare_value, render_expr, render_order_expr
 
 
 def compile_query(query: QueryPlan) -> str:
@@ -69,6 +74,21 @@ def _render_node(node: QueryPlanNode, query: QueryPlan) -> str:
             select_sql = ", ".join(render_expr(expr, ctx) for expr in projections)
             return f"SELECT {select_sql} FROM ({child_sql}) {alias}"
 
+        case RenamePlan(input=inner, renames=renames):
+            child_sql = _render_node(inner, query)
+            child_analysis = analyze_node(inner, query, has_parent=True)
+            alias = _alias_for(node)
+            rename_map = dict(renames)
+            select_sql = ", ".join(
+                (
+                    f'{alias}.{quote_ident(name)} AS {quote_ident(rename_map[name])}'
+                    if name in rename_map
+                    else f'{alias}.{quote_ident(name)}'
+                )
+                for name in child_analysis.columns
+            )
+            return f"SELECT {select_sql} FROM ({child_sql}) {alias}"
+
         case GroupPlan(input=inner, keys=keys, aggregations=aggregations):
             child_sql = _render_node(inner, query)
             child_analysis = analyze_node(inner, query, has_parent=True)
@@ -107,33 +127,57 @@ def _render_node(node: QueryPlanNode, query: QueryPlan) -> str:
 
 def _render_source(source: SourceSpec, query: QueryPlan) -> str:
     kind = source_kind(source)
-
-    if kind == "object":
-        source_sql = f'SELECT * FROM {query.ocel._table_sql("object")}'
-    elif kind == "object_state":
-        mode = object_state_mode(source)
-        if mode is None:
-            raise ValueError(
-                "object_states(...) queries require an explicit temporal projection; "
-                "call .latest() or .as_of(timestamp)"
-            )
-        source_sql = f"""
-            SELECT *
-            FROM (
-                {render_object_state_source(
-                    query.ocel._table_refs,
-                    tuple(query.ocel._available_columns("object_change")),
-                    mode=mode,
-                    as_of=object_state_as_of(source),
-                )}
-            ) object_state
-        """
-    elif kind == "object_change":
-        source_sql = f'SELECT * FROM {query.ocel._table_sql("object_change")}'
-    else:
-        source_sql = f'SELECT * FROM {query.ocel._table_sql(kind)}'
-
     types = selected_types(source)
+
+    match kind:
+        case "object":
+            source_sql = f'SELECT * FROM {logical_table_sql("object")}'
+        case "event_occurrence":
+            source_sql = """
+                SELECT DISTINCT
+                    e."ocel_id" AS "ocel_event_id",
+                    e."ocel_type" AS "ocel_event_type",
+                    e."ocel_time" AS "ocel_event_time",
+                    o."ocel_id" AS "ocel_object_id",
+                    o."ocel_type" AS "ocel_object_type"
+                FROM "event_object" eo
+                JOIN "event" e
+                  ON eo."ocel_event_id" = e."ocel_id"
+                JOIN "object" o
+                  ON eo."ocel_object_id" = o."ocel_id"
+            """
+        case "object_state":
+            mode = object_state_mode(source)
+            if mode is None:
+                raise ValueError(
+                    "object_states(...) queries require an explicit temporal projection; "
+                    "call .latest() or .as_of(timestamp)"
+                )
+            source_sql = f"""
+                SELECT *
+                FROM (
+                    {render_object_state_source(
+                        tuple(
+                            ocel_available_columns(
+                                query.ocel,
+                                "object_change",
+                                selected_types=types or None,
+                            )
+                        ),
+                        mode=mode,
+                        as_of=object_state_as_of(source),
+                    )}
+                ) object_state
+            """
+        case "object_change":
+            source_sql = f'SELECT * FROM {logical_table_sql("object_change")}'
+        case "event":
+            source_sql = f'SELECT * FROM {logical_table_sql("event")}'
+        case "event_object":
+            source_sql = f'SELECT * FROM {logical_table_sql("event_object")}'
+        case "object_object":
+            source_sql = f'SELECT * FROM {logical_table_sql("object_object")}'
+
     if not types:
         return source_sql
 
@@ -144,7 +188,13 @@ def _render_source(source: SourceSpec, query: QueryPlan) -> str:
         )
         for value in types
     )
-    return f"{source_sql} WHERE \"ocel_type\" IN ({values_sql})"
+    type_column = "ocel_object_type" if kind == "event_occurrence" else "ocel_type"
+    if kind == "event_occurrence":
+        return (
+            f'SELECT * FROM ({source_sql}) event_occurrence '
+            f'WHERE "{type_column}" IN ({values_sql})'
+        )
+    return f"{source_sql} WHERE \"{type_column}\" IN ({values_sql})"
 
 
 def _alias_for(node: QueryPlanNode) -> str:
@@ -164,8 +214,7 @@ def _compile_context(
     return CompileContext(
         alias=alias,
         kind=kind,
-        table_refs=query.ocel._table_refs,
-        object_change_columns=tuple(query.ocel._available_columns("object_change")),
+        object_change_columns=tuple(ocel_available_columns(query.ocel, "object_change")),
         object_state_mode=object_state_mode(source),
         object_state_as_of=object_state_as_of(source),
         event_alias=event_alias,

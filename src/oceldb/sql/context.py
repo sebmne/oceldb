@@ -2,13 +2,18 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import date, datetime
-from typing import Literal, Mapping
+from typing import Literal
 
 from oceldb.core.manifest import LogicalTableName
+from oceldb.sql.object_history import (
+    custom_object_change_columns,
+    render_object_change_batches_source,
+)
 
 ExprScopeKind = Literal[
     "event",
     "object",
+    "event_occurrence",
     "object_state",
     "object_state_at_event",
     "object_change",
@@ -17,26 +22,19 @@ ExprScopeKind = Literal[
     "grouped",
 ]
 ObjectStateMode = Literal["latest", "as_of"]
-_OBJECT_CHANGE_BASE_COLUMNS = (
-    "ocel_id",
-    "ocel_type",
-    "ocel_time",
-    "ocel_changed_field",
-)
 
 
 @dataclass(frozen=True)
 class CompileContext:
     alias: str
     kind: ExprScopeKind
-    table_refs: Mapping[LogicalTableName, str]
     object_change_columns: tuple[str, ...] = ()
     object_state_mode: ObjectStateMode | None = None
     object_state_as_of: date | datetime | str | None = None
     event_alias: str | None = None
 
     def table(self, name: LogicalTableName) -> str:
-        return _quote_ident(self.table_refs[name])
+        return _quote_ident(name)
 
     def with_alias(
         self,
@@ -48,7 +46,6 @@ class CompileContext:
         return CompileContext(
             alias=alias,
             kind=self.kind if kind is None else kind,
-            table_refs=self.table_refs,
             object_change_columns=self.object_change_columns,
             object_state_mode=self.object_state_mode,
             object_state_as_of=self.object_state_as_of,
@@ -57,25 +54,21 @@ class CompileContext:
 
 
 def render_object_state_source(
-    table_refs: Mapping[LogicalTableName, str],
     object_change_columns: tuple[str, ...],
     *,
     mode: ObjectStateMode,
     as_of: date | datetime | str | None = None,
 ) -> str:
-    custom_columns = [
-        name
-        for name in object_change_columns
-        if name not in _OBJECT_CHANGE_BASE_COLUMNS
-    ]
-    filter_sql = ""
-    if mode == "as_of":
-        if as_of is None:
-            raise ValueError("object state projection 'as_of' requires a timestamp")
-        filter_sql = f'WHERE c."ocel_time" <= {_render_literal(as_of)}'
+    custom_columns = custom_object_change_columns(object_change_columns)
+    batch_updates_sql = render_object_change_batches_source(
+        object_change_columns,
+        as_of=as_of if mode == "as_of" else None,
+    )
+    if mode == "as_of" and as_of is None:
+        raise ValueError("object state projection 'as_of' requires a timestamp")
 
     filled_columns = ",\n                ".join(
-        f'LAST_VALUE(c.{_quote_ident(name)} IGNORE NULLS) OVER state_window AS {_quote_ident(name)}'
+        f'LAST_VALUE(bu.{_quote_ident(name)} IGNORE NULLS) OVER state_window AS {_quote_ident(name)}'
         for name in custom_columns
     )
     outer_columns = ",\n            ".join(
@@ -95,7 +88,7 @@ def render_object_state_source(
             o."ocel_id" AS "ocel_id",
             o."ocel_type" AS "ocel_type",
             s."ocel_time" AS "ocel_time"{select_outer}
-        FROM {_quote_ident(table_refs["object"])} o
+        FROM {_quote_ident("object")} o
         LEFT JOIN (
             SELECT
                 ranked."ocel_id",
@@ -103,20 +96,19 @@ def render_object_state_source(
                 ranked."_oceldb_state_rank"
             FROM (
                 SELECT
-                    c."ocel_id",
-                    c."ocel_time"{select_filled},
+                    bu."ocel_id",
+                    bu."ocel_time"{select_filled},
                     ROW_NUMBER() OVER latest_window AS "_oceldb_state_rank"
-                FROM {_quote_ident(table_refs["object_change"])} c
-                {filter_sql}
+                FROM ({batch_updates_sql}) bu
                 WINDOW
                     state_window AS (
-                        PARTITION BY c."ocel_id"
-                        ORDER BY c."ocel_time"
+                        PARTITION BY bu."ocel_id"
+                        ORDER BY bu."ocel_time"
                         ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW
                     ),
                     latest_window AS (
-                        PARTITION BY c."ocel_id"
-                        ORDER BY c."ocel_time" DESC
+                        PARTITION BY bu."ocel_id"
+                        ORDER BY bu."ocel_time" DESC
                     )
             ) ranked
             WHERE ranked."_oceldb_state_rank" = 1
@@ -126,18 +118,14 @@ def render_object_state_source(
 
 
 def render_object_state_source_at_event(
-    table_refs: Mapping[LogicalTableName, str],
     object_change_columns: tuple[str, ...],
     *,
     event_alias: str,
 ) -> str:
-    custom_columns = [
-        name
-        for name in object_change_columns
-        if name not in _OBJECT_CHANGE_BASE_COLUMNS
-    ]
+    custom_columns = custom_object_change_columns(object_change_columns)
+    batch_updates_sql = render_object_change_batches_source(object_change_columns)
     filled_columns = ",\n                ".join(
-        f'LAST_VALUE(c.{_quote_ident(name)} IGNORE NULLS) OVER state_window AS {_quote_ident(name)}'
+        f'LAST_VALUE(bu.{_quote_ident(name)} IGNORE NULLS) OVER state_window AS {_quote_ident(name)}'
         for name in custom_columns
     )
     outer_columns = ",\n            ".join(
@@ -158,26 +146,26 @@ def render_object_state_source_at_event(
             o."ocel_id" AS "ocel_id",
             o."ocel_type" AS "ocel_type",
             s."ocel_time" AS "ocel_time"{select_outer}
-        FROM {_quote_ident(table_refs["object"])} o
+        FROM {_quote_ident("object")} o
         LEFT JOIN LATERAL (
             SELECT
                 ranked."ocel_time"{select_ranked}
             FROM (
                 SELECT
-                    c."ocel_time"{select_filled},
+                    bu."ocel_time"{select_filled},
                     ROW_NUMBER() OVER latest_window AS "_oceldb_state_rank"
-                FROM {_quote_ident(table_refs["object_change"])} c
-                WHERE c."ocel_id" = o."ocel_id"
-                  AND c."ocel_time" <= {event_ref}."ocel_time"
+                FROM ({batch_updates_sql}) bu
+                WHERE bu."ocel_id" = o."ocel_id"
+                  AND bu."ocel_time" <= {event_ref}."ocel_time"
                 WINDOW
                     state_window AS (
-                        PARTITION BY c."ocel_id"
-                        ORDER BY c."ocel_time"
+                        PARTITION BY bu."ocel_id"
+                        ORDER BY bu."ocel_time"
                         ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW
                     ),
                     latest_window AS (
-                        PARTITION BY c."ocel_id"
-                        ORDER BY c."ocel_time" DESC
+                        PARTITION BY bu."ocel_id"
+                        ORDER BY bu."ocel_time" DESC
                     )
             ) ranked
             WHERE ranked."_oceldb_state_rank" = 1
@@ -188,12 +176,3 @@ def render_object_state_source_at_event(
 def _quote_ident(name: str) -> str:
     escaped = name.replace('"', '""')
     return f'"{escaped}"'
-
-
-def _render_literal(value: date | datetime | str) -> str:
-    if isinstance(value, datetime):
-        return f"'{value.isoformat(sep=' ')}'"
-    if isinstance(value, date):
-        return f"'{value.isoformat()}'"
-    escaped = value.replace("'", "''")
-    return f"'{escaped}'"

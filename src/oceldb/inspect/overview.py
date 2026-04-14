@@ -5,6 +5,7 @@ from datetime import datetime
 from typing import Optional
 
 from oceldb.core.ocel import OCEL
+from oceldb.inspect.profile import table_counts, time_range
 from oceldb.inspect.types import event_types, object_types
 
 
@@ -19,19 +20,14 @@ class OCELOverview:
 
 
 def overview(ocel: OCEL) -> OCELOverview:
-    event_count = ocel.query.events().count()
-    object_count = ocel.query.objects().count()
-
-    time_window = ocel.query.events().select("ocel_time").collect()
-    row = time_window.aggregate(
-        "MIN(ocel_time) AS earliest, MAX(ocel_time) AS latest"
-    ).fetchone()
+    counts = table_counts(ocel)
+    event_window = time_range(ocel)
 
     return OCELOverview(
-        event_count=event_count,
-        object_count=object_count,
+        event_count=counts.event_count,
+        object_count=counts.object_count,
         event_type_count=len(event_types(ocel)),
         object_type_count=len(object_types(ocel)),
-        earliest_event_time=None if row is None else row[0],
-        latest_event_time=None if row is None else row[1],
+        earliest_event_time=event_window.earliest_event_time,
+        latest_event_time=event_window.latest_event_time,
     )

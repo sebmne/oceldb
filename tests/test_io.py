@@ -150,6 +150,7 @@ def _manifest_with_stale_columns(manifest: OCELManifest) -> OCELManifest:
             **dict(event.custom_columns),
             "ghost_event": "VARCHAR",
         },
+        type_attributes=event.type_attributes,
     )
     tables["object_change"] = TableSchema(
         name="object_change",
@@ -158,6 +159,7 @@ def _manifest_with_stale_columns(manifest: OCELManifest) -> OCELManifest:
             **dict(object_change.custom_columns),
             "ghost_state": "VARCHAR",
         },
+        type_attributes=object_change.type_attributes,
     )
 
     return OCELManifest(
@@ -217,6 +219,32 @@ def test_write_rebuilds_manifest_from_actual_tables(ocel, tmp_path):
         assert reloaded.query.events().count() == 5
 
 
+def test_written_manifest_omits_non_attribute_table_metadata(ocel, tmp_path):
+    written = ocel.write(tmp_path / "manifest-shape")
+    raw_manifest = json.loads((written / "manifest.json").read_text(encoding="utf-8"))
+    raw_tables = raw_manifest["tables"]
+
+    assert raw_tables["object"] == {}
+    assert raw_tables["event_object"] == {}
+    assert raw_tables["object_object"] == {}
+    assert set(raw_tables["event"]["custom_columns"]) == {
+        "total_price",
+        "method",
+    }
+    assert raw_tables["event"]["type_attributes"] == {
+        "Create Order": ["total_price"],
+        "Pay Order": ["method"],
+    }
+    assert raw_tables["object_change"]["custom_columns"] == {
+        "status": "VARCHAR",
+        "name": "VARCHAR",
+    }
+    assert raw_tables["object_change"]["type_attributes"] == {
+        "customer": ["name"],
+        "order": ["status"],
+    }
+
+
 def test_to_ocel_returns_independent_handle(ocel):
     derived = (
         ocel.query
@@ -274,6 +302,9 @@ def test_to_ocel_prunes_dead_event_custom_columns(ocel):
     try:
         custom_columns = derived.manifest.table("event").custom_columns
         assert set(custom_columns) == {"total_price"}
+        assert derived.manifest.table("event").type_attributes == {
+            "Create Order": ("total_price",),
+        }
         assert derived.query.events().count() == 3
     finally:
         derived.close()
@@ -291,6 +322,9 @@ def test_to_ocel_prunes_dead_object_history_columns(ocel_with_orphan_object):
         assert derived.manifest.table("object_change").custom_columns == {
             "status": "VARCHAR",
         }
+        assert derived.manifest.table("object_change").type_attributes == {
+            "order": ("status",),
+        }
         assert derived.query.objects().ids() == ["o2"]
     finally:
         derived.close()
@@ -306,6 +340,14 @@ def test_convert_sqlite_roundtrip(tmp_path):
     with OCEL.read(written) as ocel:
         assert ocel.query.events().count() == 3
         assert ocel.query.object_states("order").latest().where(col("status") == "open").ids() == ["o1"]
+        assert ocel.manifest.table("event").type_attributes == {
+            "Create Order": ("total_price",),
+            "Pay Order": ("method",),
+        }
+        assert ocel.manifest.table("object_change").type_attributes == {
+            "customer": ("name",),
+            "order": ("status",),
+        }
         assert (
             ocel.query
             .events("Create Order")
@@ -362,3 +404,24 @@ def test_read_rejects_file_sources(tmp_path):
 
     with pytest.raises(ValueError, match="must be a directory"):
         OCEL.read(file_path)
+
+
+def test_read_rejects_incomplete_directory_layout(tmp_path):
+    broken = tmp_path / "broken"
+    broken.mkdir()
+    (broken / "manifest.json").write_text(
+        json.dumps(
+            {
+                "format": "oceldb",
+                "storage_version": "3",
+                "oceldb_version": "0.3.0",
+                "source": "broken.sqlite",
+                "created_at": "2026-01-01T00:00:00+00:00",
+                "tables": {},
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(FileNotFoundError, match="missing required files"):
+        OCEL.read(broken)

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections.abc import Iterable
 from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Literal, Mapping
@@ -8,6 +9,7 @@ LogicalTableName = Literal["event", "object", "object_change", "event_object", "
 QuerySourceKind = Literal[
     "event",
     "object",
+    "event_occurrence",
     "object_state",
     "object_change",
     "event_object",
@@ -21,19 +23,42 @@ class TableSchema:
     Schema description for one logical OCEL table.
 
     The schema is split into required core columns and user-facing custom
-    columns discovered during conversion. Query validation and inspection use
-    this metadata instead of inspecting parquet files on every operation.
+    columns discovered during conversion. For wide event and object-history
+    tables, `type_attributes` records which custom attributes logically belong
+    to which OCEL type.
+
+    Query validation, inspection, and discovery use this metadata instead of
+    inferring attribute ownership from sparse parquet rows.
     """
 
     name: LogicalTableName
     core_columns: Mapping[str, str]
     custom_columns: Mapping[str, str] = field(default_factory=lambda: {})
+    type_attributes: Mapping[str, tuple[str, ...]] = field(default_factory=lambda: {})
 
     @property
     def columns(self) -> dict[str, str]:
         return {
             **dict(self.core_columns),
             **dict(self.custom_columns),
+        }
+
+    def attributes_for_type(self, type_name: str) -> tuple[str, ...]:
+        return tuple(self.type_attributes.get(type_name, ()))
+
+    def custom_columns_for_types(
+        self,
+        type_names: Iterable[str],
+    ) -> dict[str, str]:
+        selected = {
+            attribute
+            for type_name in type_names
+            for attribute in self.attributes_for_type(type_name)
+        }
+        return {
+            name: sql_type
+            for name, sql_type in self.custom_columns.items()
+            if name in selected
         }
 
 

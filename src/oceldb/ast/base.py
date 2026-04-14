@@ -28,6 +28,21 @@ class ExprVisitor(ABC, Generic[T]):
     def visit_cast(self, expr: "CastExpr") -> T: ...
 
     @abstractmethod
+    def visit_binary_op(self, expr: "BinaryOpExpr") -> T: ...
+
+    @abstractmethod
+    def visit_scalar_function(self, expr: "FunctionExpr") -> T: ...
+
+    @abstractmethod
+    def visit_predicate_function(self, expr: "PredicateFunctionExpr") -> T: ...
+
+    @abstractmethod
+    def visit_case(self, expr: "CaseExpr") -> T: ...
+
+    @abstractmethod
+    def visit_window_function(self, expr: "WindowFunctionExpr") -> T: ...
+
+    @abstractmethod
     def visit_compare(self, expr: "CompareExpr") -> T: ...
 
     @abstractmethod
@@ -79,6 +94,12 @@ class Expr(ABC):
             raise ValueError("Alias must not be empty")
         return AliasExpr(expr=self, name=name)
 
+    def __bool__(self) -> bool:
+        raise TypeError(
+            "oceldb expressions cannot be used as Python booleans; "
+            "use &, |, and ~ to combine predicates"
+        )
+
     @abstractmethod
     def accept(self, visitor: ExprVisitor[T]) -> T:
         raise NotImplementedError
@@ -119,6 +140,83 @@ class ScalarExpr(Expr):
         if not sql_type:
             raise ValueError("Cast type must not be empty")
         return CastExpr(self, sql_type)
+
+    def fill_null(self, value: "ScalarValue") -> "FunctionExpr":
+        return FunctionExpr(name="coalesce", args=(self, value))
+
+    def abs(self) -> "FunctionExpr":
+        return FunctionExpr(name="abs", args=(self,))
+
+    def round(self, decimals: "ScalarValue" = 0) -> "FunctionExpr":
+        return FunctionExpr(name="round", args=(self, decimals))
+
+    def lag(
+        self,
+        offset: int = 1,
+        *,
+        default: ScalarValue | None = None,
+    ) -> "WindowFunctionExpr":
+        if offset < 1:
+            raise ValueError("lag(...) requires a positive offset")
+        return WindowFunctionExpr(
+            name="lag",
+            args=(self,),
+            offset=offset,
+            default=default,
+        )
+
+    def lead(
+        self,
+        offset: int = 1,
+        *,
+        default: ScalarValue | None = None,
+    ) -> "WindowFunctionExpr":
+        if offset < 1:
+            raise ValueError("lead(...) requires a positive offset")
+        return WindowFunctionExpr(
+            name="lead",
+            args=(self,),
+            offset=offset,
+            default=default,
+        )
+
+    @property
+    def str(self) -> "StringNamespace":
+        return StringNamespace(self)
+
+    @property
+    def dt(self) -> "DatetimeNamespace":
+        return DatetimeNamespace(self)
+
+    def __add__(self, other: "ScalarValue") -> "BinaryOpExpr":
+        return BinaryOpExpr(self, "+", other)
+
+    def __radd__(self, other: "ScalarValue") -> "BinaryOpExpr":
+        return BinaryOpExpr(other, "+", self)
+
+    def __sub__(self, other: "ScalarValue") -> "BinaryOpExpr":
+        return BinaryOpExpr(self, "-", other)
+
+    def __rsub__(self, other: "ScalarValue") -> "BinaryOpExpr":
+        return BinaryOpExpr(other, "-", self)
+
+    def __mul__(self, other: "ScalarValue") -> "BinaryOpExpr":
+        return BinaryOpExpr(self, "*", other)
+
+    def __rmul__(self, other: "ScalarValue") -> "BinaryOpExpr":
+        return BinaryOpExpr(other, "*", self)
+
+    def __truediv__(self, other: "ScalarValue") -> "BinaryOpExpr":
+        return BinaryOpExpr(self, "/", other)
+
+    def __rtruediv__(self, other: "ScalarValue") -> "BinaryOpExpr":
+        return BinaryOpExpr(other, "/", self)
+
+    def __mod__(self, other: "ScalarValue") -> "BinaryOpExpr":
+        return BinaryOpExpr(self, "%", other)
+
+    def __rmod__(self, other: "ScalarValue") -> "BinaryOpExpr":
+        return BinaryOpExpr(other, "%", self)
 
 
 class BoolExpr(Expr):
@@ -163,6 +261,88 @@ class CastExpr(ScalarExpr):
 
     def accept(self, visitor: ExprVisitor[T]) -> T:
         return visitor.visit_cast(self)
+
+
+@final
+@dataclass(frozen=True, eq=False)
+class BinaryOpExpr(ScalarExpr):
+    left: "ScalarValue"
+    op: str
+    right: "ScalarValue"
+
+    def accept(self, visitor: ExprVisitor[T]) -> T:
+        return visitor.visit_binary_op(self)
+
+
+@final
+@dataclass(frozen=True, eq=False)
+class FunctionExpr(ScalarExpr):
+    name: str
+    args: tuple["ScalarValue", ...]
+
+    def accept(self, visitor: ExprVisitor[T]) -> T:
+        return visitor.visit_scalar_function(self)
+
+
+@final
+@dataclass(frozen=True)
+class PredicateFunctionExpr(BoolExpr):
+    name: str
+    args: tuple["ScalarValue", ...]
+
+    def accept(self, visitor: ExprVisitor[T]) -> T:
+        return visitor.visit_predicate_function(self)
+
+
+@final
+@dataclass(frozen=True, eq=False)
+class CaseExpr(ScalarExpr):
+    branches: tuple[tuple["BoolExpr", "ScalarValue"], ...]
+    default: "ScalarValue"
+
+    def accept(self, visitor: ExprVisitor[T]) -> T:
+        return visitor.visit_case(self)
+
+
+@final
+@dataclass(frozen=True)
+class WindowSpec:
+    partition_by: tuple[ScalarExpr, ...] = ()
+    order_by: tuple["SortExpr", ...] = ()
+
+
+@final
+@dataclass(frozen=True, eq=False)
+class WindowFunctionExpr(ScalarExpr):
+    name: str
+    args: tuple["ScalarValue", ...] = ()
+    offset: int | None = None
+    default: ScalarValue | None = None
+    window: WindowSpec | None = None
+
+    def over(
+        self,
+        *,
+        partition_by: "WindowPartitionArg" = (),
+        order_by: "WindowOrderArg",
+    ) -> "WindowFunctionExpr":
+        partition_exprs = _coerce_partition_exprs(partition_by)
+        order_exprs = _coerce_order_exprs(order_by)
+        if not order_exprs:
+            raise ValueError("over(...) requires at least one order_by expression")
+        return WindowFunctionExpr(
+            name=self.name,
+            args=self.args,
+            offset=self.offset,
+            default=self.default,
+            window=WindowSpec(
+                partition_by=partition_exprs,
+                order_by=order_exprs,
+            ),
+        )
+
+    def accept(self, visitor: ExprVisitor[T]) -> T:
+        return visitor.visit_window_function(self)
 
 
 @final
@@ -225,6 +405,45 @@ class InExpr(BoolExpr):
         return visitor.visit_in(self)
 
 
+@final
+@dataclass(frozen=True)
+class StringNamespace:
+    expr: ScalarExpr
+
+    def lower(self) -> FunctionExpr:
+        return FunctionExpr(name="lower", args=(self.expr,))
+
+    def upper(self) -> FunctionExpr:
+        return FunctionExpr(name="upper", args=(self.expr,))
+
+    def contains(self, value: "ScalarValue") -> PredicateFunctionExpr:
+        return PredicateFunctionExpr(name="contains", args=(self.expr, value))
+
+    def starts_with(self, value: "ScalarValue") -> PredicateFunctionExpr:
+        return PredicateFunctionExpr(name="starts_with", args=(self.expr, value))
+
+    def ends_with(self, value: "ScalarValue") -> PredicateFunctionExpr:
+        return PredicateFunctionExpr(name="ends_with", args=(self.expr, value))
+
+
+@final
+@dataclass(frozen=True)
+class DatetimeNamespace:
+    expr: ScalarExpr
+
+    def year(self) -> FunctionExpr:
+        return FunctionExpr(name="year", args=(self.expr,))
+
+    def month(self) -> FunctionExpr:
+        return FunctionExpr(name="month", args=(self.expr,))
+
+    def day(self) -> FunctionExpr:
+        return FunctionExpr(name="day", args=(self.expr,))
+
+    def date(self) -> FunctionExpr:
+        return FunctionExpr(name="date", args=(self.expr,))
+
+
 @dataclass(frozen=True)
 class SortExpr:
     expr: Expr | str
@@ -232,4 +451,51 @@ class SortExpr:
 
 
 LiteralValue = Union[None, bool, int, float, Decimal, str, date, datetime]
+ScalarValue = Union["ScalarExpr", LiteralValue]
 CompareValue = Union[Expr, LiteralValue]
+WindowPartitionItem = Union["ScalarExpr", str]
+WindowPartitionArg = Union[
+    WindowPartitionItem,
+    Iterable[WindowPartitionItem],
+]
+WindowOrderItem = Union["ScalarExpr", str, SortExpr]
+WindowOrderArg = Union[
+    WindowOrderItem,
+    Iterable[WindowOrderItem],
+]
+
+
+def _coerce_partition_exprs(value: WindowPartitionArg) -> tuple[ScalarExpr, ...]:
+    if isinstance(value, (str, ScalarExpr)):
+        items: tuple[WindowPartitionItem, ...] = (value,)
+    else:
+        items = tuple(value)
+    return tuple(_coerce_partition_item(item) for item in items)
+
+
+def _coerce_order_exprs(value: WindowOrderArg) -> tuple[SortExpr, ...]:
+    if isinstance(value, (str, ScalarExpr, SortExpr)):
+        items: tuple[WindowOrderItem, ...] = (value,)
+    else:
+        items = tuple(value)
+    result: list[SortExpr] = []
+    for item in items:
+        if isinstance(item, SortExpr):
+            result.append(item)
+        elif isinstance(item, str):
+            result.append(SortExpr(expr=_column_expr(item)))
+        else:
+            result.append(SortExpr(expr=item))
+    return tuple(result)
+
+
+def _coerce_partition_item(value: WindowPartitionItem) -> ScalarExpr:
+    if isinstance(value, str):
+        return _column_expr(value)
+    return value
+
+
+def _column_expr(name: str) -> "ColumnExpr":
+    from oceldb.ast.field import ColumnExpr
+
+    return ColumnExpr(name=name)

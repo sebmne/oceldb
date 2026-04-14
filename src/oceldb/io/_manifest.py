@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from collections.abc import Mapping
 from datetime import datetime
 from pathlib import Path
 from typing import cast
@@ -10,7 +11,7 @@ import duckdb
 from oceldb.core.manifest import LogicalTableName, OCELManifest, TableSchema
 
 MANIFEST_FILE = "manifest.json"
-STORAGE_VERSION = "2"
+STORAGE_VERSION = "3"
 LOGICAL_TABLES: tuple[LogicalTableName, ...] = (
     "event",
     "object",
@@ -18,6 +19,7 @@ LOGICAL_TABLES: tuple[LogicalTableName, ...] = (
     "event_object",
     "object_object",
 )
+ATTRIBUTE_TABLES: frozenset[LogicalTableName] = frozenset({"event", "object_change"})
 CORE_COLUMNS: dict[LogicalTableName, dict[str, str]] = {
     "event": {
         "ocel_id": "VARCHAR",
@@ -98,10 +100,16 @@ def load_manifest(path: Path) -> OCELManifest:
     tables: dict[LogicalTableName, TableSchema] = {}
     for name in LOGICAL_TABLES:
         custom_columns = _load_custom_columns(raw_tables, table_name=name)
+        type_attributes = _load_type_attributes(
+            raw_tables,
+            table_name=name,
+            custom_columns=custom_columns,
+        )
         tables[name] = TableSchema(
             name=name,
             core_columns=CORE_COLUMNS[name],
             custom_columns=custom_columns,
+            type_attributes=type_attributes,
         )
 
     return OCELManifest(
@@ -124,6 +132,7 @@ def build_manifest_from_tables(
     created_at: datetime,
     schema: str | None = None,
     drop_empty_custom_columns: bool = False,
+    source_manifest: OCELManifest | None = None,
 ) -> OCELManifest:
     tables: dict[LogicalTableName, TableSchema] = {}
     for table_name in LOGICAL_TABLES:
@@ -132,6 +141,11 @@ def build_manifest_from_tables(
             table_name=table_name,
             schema=schema,
             drop_empty_custom_columns=drop_empty_custom_columns,
+            source_type_attributes=(
+                source_manifest.table(table_name).type_attributes
+                if source_manifest is not None
+                else {}
+            ),
         )
 
     return OCELManifest(
@@ -151,9 +165,7 @@ def write_manifest(path: Path, manifest: OCELManifest) -> None:
         "source": manifest.source,
         "created_at": manifest.created_at.isoformat(),
         "tables": {
-            name: {
-                "custom_columns": dict(schema.custom_columns),
-            }
+            name: _serialize_table_schema(schema)
             for name, schema in manifest.tables.items()
         },
     }
@@ -167,6 +179,7 @@ def _build_table_schema(
     table_name: LogicalTableName,
     schema: str | None,
     drop_empty_custom_columns: bool,
+    source_type_attributes: Mapping[str, tuple[str, ...]],
 ) -> TableSchema:
     location = _qualified_table_name(table_name, schema=schema)
     rows = con.execute(
@@ -197,10 +210,17 @@ def _build_table_schema(
         for name, sql_type in actual_columns.items()
         if name in present_custom_columns
     }
+    type_attributes = _prune_type_attributes(
+        con,
+        location=location,
+        custom_columns=custom_columns,
+        source_type_attributes=source_type_attributes,
+    )
     return TableSchema(
         name=table_name,
         core_columns=core_columns,
         custom_columns=custom_columns,
+        type_attributes=type_attributes,
     )
 
 
@@ -209,6 +229,9 @@ def _load_custom_columns(
     *,
     table_name: LogicalTableName,
 ) -> dict[str, str]:
+    if table_name not in ATTRIBUTE_TABLES:
+        return {}
+
     raw_table = raw_tables.get(table_name)
     if raw_table is None:
         return {}
@@ -231,6 +254,58 @@ def _load_custom_columns(
     }
 
 
+def _load_type_attributes(
+    raw_tables: dict[str, object],
+    *,
+    table_name: LogicalTableName,
+    custom_columns: Mapping[str, str],
+) -> dict[str, tuple[str, ...]]:
+    if table_name not in ATTRIBUTE_TABLES:
+        return {}
+
+    raw_table = raw_tables.get(table_name)
+    if raw_table is None:
+        return {}
+    if not isinstance(raw_table, dict):
+        raise ValueError(
+            f"Invalid tables.{table_name!s} section in manifest.json: expected an object"
+        )
+    raw_table_dict = cast(dict[str, object], raw_table)
+
+    raw_type_attributes = raw_table_dict.get("type_attributes", {})
+    if not isinstance(raw_type_attributes, dict):
+        raise ValueError(
+            f"Invalid tables.{table_name!s}.type_attributes section in manifest.json: expected an object"
+        )
+    raw_type_attributes_dict = cast(dict[str, object], raw_type_attributes)
+
+    type_attributes: dict[str, tuple[str, ...]] = {}
+    known_attributes = set(custom_columns)
+    for type_name, raw_attributes in raw_type_attributes_dict.items():
+        if not isinstance(raw_attributes, list):
+            raise ValueError(
+                f"Invalid tables.{table_name!s}.type_attributes.{type_name} in manifest.json: expected a list"
+            )
+
+        raw_attribute_list = cast(list[object], raw_attributes)
+        attributes = tuple(
+            _expect_str(
+                value,
+                path=f"manifest.tables.{table_name}.type_attributes.{type_name}[]",
+            )
+            for value in raw_attribute_list
+        )
+        unknown = [name for name in attributes if name not in known_attributes]
+        if unknown:
+            raise ValueError(
+                f"Invalid tables.{table_name!s}.type_attributes.{type_name} in manifest.json: unknown custom columns "
+                f"{', '.join(sorted(repr(name) for name in unknown))}"
+            )
+        type_attributes[str(type_name)] = attributes
+
+    return type_attributes
+
+
 def _expect_object(value: object, *, path: str) -> dict[str, object]:
     if not isinstance(value, dict):
         raise ValueError(f"Invalid {path} section in manifest.json: expected an object")
@@ -241,6 +316,19 @@ def _expect_str(value: object, *, path: str) -> str:
     if not isinstance(value, str):
         raise ValueError(f"Invalid {path} value in manifest.json: expected a string")
     return value
+
+
+def _serialize_table_schema(schema: TableSchema) -> dict[str, object]:
+    if schema.name not in ATTRIBUTE_TABLES:
+        return {}
+
+    return {
+        "custom_columns": dict(schema.custom_columns),
+        "type_attributes": {
+            type_name: list(attributes)
+            for type_name, attributes in schema.type_attributes.items()
+        },
+    }
 
 
 def _qualified_table_name(table_name: str, *, schema: str | None) -> str:
@@ -279,4 +367,34 @@ def _non_null_custom_columns(
         name
         for name, has_value in zip(column_names, row, strict=False)
         if bool(has_value)
+    }
+
+
+def _prune_type_attributes(
+    con: duckdb.DuckDBPyConnection,
+    *,
+    location: str,
+    custom_columns: Mapping[str, str],
+    source_type_attributes: Mapping[str, tuple[str, ...]],
+) -> dict[str, tuple[str, ...]]:
+    if not source_type_attributes:
+        return {}
+
+    type_rows = con.execute(f"""
+        SELECT DISTINCT "ocel_type"
+        FROM {location}
+        WHERE "ocel_type" IS NOT NULL
+        ORDER BY "ocel_type"
+    """).fetchall()
+    present_types = {str(row[0]) for row in type_rows}
+    custom_column_names = set(custom_columns)
+
+    return {
+        type_name: tuple(
+            attribute
+            for attribute in attributes
+            if attribute in custom_column_names
+        )
+        for type_name, attributes in source_type_attributes.items()
+        if type_name in present_types
     }

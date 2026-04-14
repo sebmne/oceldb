@@ -5,7 +5,8 @@ from typing import Literal
 
 from oceldb.ast.base import BoolExpr, ExprVisitor, ScalarExpr, T
 
-RelationKind = Literal["related", "linked", "has_event", "has_object"]
+RelationKind = Literal["cooccurs_with", "linked", "has_event", "has_object"]
+LinkedDirection = Literal["bidirectional", "outgoing", "incoming"]
 
 
 @dataclass(frozen=True)
@@ -13,6 +14,8 @@ class RelationSpec:
     kind: RelationKind
     target_type: str
     filters: tuple[BoolExpr, ...] = field(default_factory=tuple)
+    linked_direction: LinkedDirection = "bidirectional"
+    linked_max_hops: int | None = 1
 
 
 @dataclass(frozen=True)

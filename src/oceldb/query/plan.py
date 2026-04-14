@@ -27,6 +27,11 @@ class ObjectChangeSource:
 
 
 @dataclass(frozen=True)
+class EventOccurrenceSource:
+    selected_object_types: tuple[str, ...] = ()
+
+
+@dataclass(frozen=True)
 class ObjectStateSource:
     selected_types: tuple[str, ...] = ()
     mode: ObjectStateMode | None = None
@@ -47,6 +52,7 @@ type SourceSpec = (
     EventSource
     | ObjectSource
     | ObjectChangeSource
+    | EventOccurrenceSource
     | ObjectStateSource
     | EventObjectSource
     | ObjectObjectSource
@@ -83,6 +89,12 @@ class ProjectPlan:
 
 
 @dataclass(frozen=True)
+class RenamePlan:
+    input: QueryPlanNode
+    renames: tuple[tuple[str, str], ...]
+
+
+@dataclass(frozen=True)
 class GroupPlan:
     input: QueryPlanNode
     keys: tuple[Expr, ...]
@@ -112,6 +124,7 @@ type QueryPlanNode = (
     | HavingPlan
     | ExtendPlan
     | ProjectPlan
+    | RenamePlan
     | GroupPlan
     | SortPlan
     | DistinctPlan
@@ -144,7 +157,7 @@ def root_source(node: QueryPlanNode) -> SourceSpec:
     match node:
         case SourcePlan(source=source):
             return source
-        case FilterPlan(input=inner) | HavingPlan(input=inner) | ExtendPlan(input=inner) | ProjectPlan(input=inner) | GroupPlan(input=inner) | SortPlan(input=inner) | DistinctPlan(input=inner) | LimitPlan(input=inner):
+        case FilterPlan(input=inner) | HavingPlan(input=inner) | ExtendPlan(input=inner) | ProjectPlan(input=inner) | RenamePlan(input=inner) | GroupPlan(input=inner) | SortPlan(input=inner) | DistinctPlan(input=inner) | LimitPlan(input=inner):
             return root_source(inner)
     assert_never(node)
 
@@ -157,6 +170,8 @@ def source_kind(source: SourceSpec) -> QuerySourceKind:
             return "object"
         case ObjectChangeSource():
             return "object_change"
+        case EventOccurrenceSource():
+            return "event_occurrence"
         case ObjectStateSource():
             return "object_state"
         case EventObjectSource():
@@ -169,6 +184,8 @@ def source_kind(source: SourceSpec) -> QuerySourceKind:
 def selected_types(source: SourceSpec) -> tuple[str, ...]:
     match source:
         case EventSource(selected_types=types) | ObjectSource(selected_types=types) | ObjectChangeSource(selected_types=types) | ObjectStateSource(selected_types=types):
+            return types
+        case EventOccurrenceSource(selected_object_types=types):
             return types
         case EventObjectSource() | ObjectObjectSource():
             return ()
@@ -194,7 +211,7 @@ def contains_node(node: QueryPlanNode, node_types: tuple[type[object], ...]) -> 
     match node:
         case SourcePlan():
             return False
-        case FilterPlan(input=inner) | HavingPlan(input=inner) | ExtendPlan(input=inner) | ProjectPlan(input=inner) | GroupPlan(input=inner) | SortPlan(input=inner) | DistinctPlan(input=inner) | LimitPlan(input=inner):
+        case FilterPlan(input=inner) | HavingPlan(input=inner) | ExtendPlan(input=inner) | ProjectPlan(input=inner) | RenamePlan(input=inner) | GroupPlan(input=inner) | SortPlan(input=inner) | DistinctPlan(input=inner) | LimitPlan(input=inner):
             return contains_node(inner, node_types)
     assert_never(node)
 
@@ -203,7 +220,7 @@ def plan_depth(node: QueryPlanNode) -> int:
     match node:
         case SourcePlan():
             return 0
-        case FilterPlan(input=inner) | HavingPlan(input=inner) | ExtendPlan(input=inner) | ProjectPlan(input=inner) | GroupPlan(input=inner) | SortPlan(input=inner) | DistinctPlan(input=inner) | LimitPlan(input=inner):
+        case FilterPlan(input=inner) | HavingPlan(input=inner) | ExtendPlan(input=inner) | ProjectPlan(input=inner) | RenamePlan(input=inner) | GroupPlan(input=inner) | SortPlan(input=inner) | DistinctPlan(input=inner) | LimitPlan(input=inner):
             return plan_depth(inner) + 1
     assert_never(node)
 
@@ -220,6 +237,8 @@ def _replace_root_source(node: QueryPlanNode, source: SourceSpec) -> QueryPlanNo
             return ExtendPlan(_replace_root_source(inner, source), assignments)
         case ProjectPlan(input=inner, projections=projections):
             return ProjectPlan(_replace_root_source(inner, source), projections)
+        case RenamePlan(input=inner, renames=renames):
+            return RenamePlan(_replace_root_source(inner, source), renames)
         case GroupPlan(input=inner, keys=keys, aggregations=aggregations):
             return GroupPlan(_replace_root_source(inner, source), keys, aggregations)
         case SortPlan(input=inner, orderings=orderings):

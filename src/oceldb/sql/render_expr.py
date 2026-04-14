@@ -8,20 +8,32 @@ from oceldb.ast.aggregation import AvgAgg, CountAgg, CountDistinctAgg, MaxAgg, M
 from oceldb.ast.base import (
     AliasExpr,
     AndExpr,
+    BinaryOpExpr,
+    CaseExpr,
     CastExpr,
     CompareExpr,
     CompareValue,
     Expr,
     ExprVisitor,
+    FunctionExpr,
     InExpr,
     LiteralExpr,
     NotExpr,
+    PredicateFunctionExpr,
     SortExpr,
     UnaryPredicate,
+    WindowFunctionExpr,
     OrExpr,
 )
 from oceldb.ast.field import ColumnExpr
-from oceldb.ast.relation import RelationAllExpr, RelationCountExpr, RelationExistsExpr, RelationKind, RelationSpec
+from oceldb.ast.relation import (
+    LinkedDirection,
+    RelationAllExpr,
+    RelationCountExpr,
+    RelationExistsExpr,
+    RelationKind,
+    RelationSpec,
+)
 from oceldb.sql.context import (
     CompileContext,
     ExprScopeKind,
@@ -75,6 +87,46 @@ class SQLRenderVisitor(ExprVisitor[str]):
 
     def visit_cast(self, expr: CastExpr) -> str:
         return f"TRY_CAST({render_expr(expr.expr, self.ctx)} AS {expr.sql_type})"
+
+    def visit_binary_op(self, expr: BinaryOpExpr) -> str:
+        left = _render_scalar_value(expr.left, self.ctx)
+        right = _render_scalar_value(expr.right, self.ctx)
+        return f"({left} {expr.op} {right})"
+
+    def visit_scalar_function(self, expr: FunctionExpr) -> str:
+        return _render_scalar_function(expr, self.ctx)
+
+    def visit_predicate_function(self, expr: PredicateFunctionExpr) -> str:
+        return _render_predicate_function(expr, self.ctx)
+
+    def visit_case(self, expr: CaseExpr) -> str:
+        when_sql = " ".join(
+            f"WHEN {render_expr(condition, self.ctx)} THEN {_render_scalar_value(value, self.ctx)}"
+            for condition, value in expr.branches
+        )
+        else_sql = _render_scalar_value(expr.default, self.ctx)
+        return f"(CASE {when_sql} ELSE {else_sql} END)"
+
+    def visit_window_function(self, expr: WindowFunctionExpr) -> str:
+        if expr.window is None:
+            raise ValueError(
+                f"Window function {expr.name}(...) requires .over(...) before it can be rendered"
+            )
+
+        partition_sql = ""
+        if expr.window.partition_by:
+            partition_sql = "PARTITION BY " + ", ".join(
+                render_expr(value, self.ctx)
+                for value in expr.window.partition_by
+            )
+
+        order_sql = "ORDER BY " + ", ".join(
+            render_order_expr(value, self.ctx)
+            for value in expr.window.order_by
+        )
+
+        clauses = [clause for clause in (partition_sql, order_sql) if clause]
+        return f"{_render_window_function_call(expr, self.ctx)} OVER ({' '.join(clauses)})"
 
     def visit_compare(self, expr: CompareExpr) -> str:
         left = render_expr(expr.left, self.ctx)
@@ -153,8 +205,8 @@ def render_relation_subquery(
     extra_predicates: list[str] | None = None,
 ) -> str:
     match spec.kind:
-        case "related":
-            return _render_related_subquery(
+        case "cooccurs_with":
+            return _render_cooccurs_with_subquery(
                 spec,
                 ctx,
                 select_sql=select_sql,
@@ -184,7 +236,7 @@ def render_relation_subquery(
     assert_never(spec.kind)
 
 
-def _render_related_subquery(
+def _render_cooccurs_with_subquery(
     spec: RelationSpec,
     ctx: CompileContext,
     *,
@@ -192,7 +244,7 @@ def _render_related_subquery(
     extra_predicates: list[str],
 ) -> str:
     if ctx.kind not in {"object", "object_state"}:
-        raise ValueError("related(...) is only valid in object-rooted scope")
+        raise ValueError("cooccurs_with(...) is only valid in object-rooted scope")
 
     candidate_alias = "ro"
     candidate_kind = relation_candidate_kind(spec.kind, ctx.kind)
@@ -237,14 +289,93 @@ def _render_linked_subquery(
     predicates.extend(render_expr(expr, candidate_ctx) for expr in spec.filters)
     predicates.extend(extra_predicates)
 
+    if spec.linked_max_hops is None:
+        return _render_unbounded_linked_subquery(
+            spec,
+            ctx,
+            candidate_alias=candidate_alias,
+            candidate_ctx=candidate_ctx,
+            select_sql=select_sql,
+            predicates=predicates,
+        )
+
+    anchor_node = f'{ctx.alias}."ocel_id"'
+    anchor_next = _linked_neighbor_sql(spec.linked_direction, anchor_node)
+    anchor_match = _linked_match_sql(spec.linked_direction, anchor_node)
+
+    recursive_node = 'lp."ocel_id"'
+    recursive_next = _linked_neighbor_sql(spec.linked_direction, recursive_node)
+    recursive_match = _linked_match_sql(spec.linked_direction, recursive_node)
+    hop_limit_sql = f'AND lp."depth" < {spec.linked_max_hops}'
+
     return f"""
+        WITH RECURSIVE linked_paths("ocel_id", "depth", "path") AS (
+            SELECT
+                {anchor_next} AS "ocel_id",
+                1 AS "depth",
+                ',' || {anchor_node} || ',' || {anchor_next} || ',' AS "path"
+            FROM {ctx.table("object_object")} oo
+            WHERE {anchor_match}
+              AND {anchor_next} <> {anchor_node}
+
+            UNION ALL
+
+            SELECT
+                {recursive_next} AS "ocel_id",
+                lp."depth" + 1 AS "depth",
+                lp."path" || {recursive_next} || ',' AS "path"
+            FROM linked_paths lp
+            JOIN {ctx.table("object_object")} oo
+              ON {recursive_match}
+            WHERE POSITION(',' || {recursive_next} || ',' IN lp."path") = 0
+              {hop_limit_sql}
+        )
         SELECT {select_sql}
-        FROM {ctx.table("object_object")} oo
+        FROM (
+            SELECT DISTINCT lp."ocel_id"
+            FROM linked_paths lp
+        ) linked_ids
         JOIN {render_scope_source(candidate_ctx)}
-          ON (
-               (oo."ocel_source_id" = {ctx.alias}."ocel_id" AND oo."ocel_target_id" = {candidate_alias}."ocel_id")
-            OR (oo."ocel_target_id" = {ctx.alias}."ocel_id" AND oo."ocel_source_id" = {candidate_alias}."ocel_id")
-          )
+          ON linked_ids."ocel_id" = {candidate_alias}."ocel_id"
+        WHERE {" AND ".join(predicates)}
+    """
+
+
+def _render_unbounded_linked_subquery(
+    spec: RelationSpec,
+    ctx: CompileContext,
+    *,
+    candidate_alias: str,
+    candidate_ctx: CompileContext,
+    select_sql: str,
+    predicates: list[str],
+) -> str:
+    anchor_node = f'{ctx.alias}."ocel_id"'
+    linked_edges_sql = _linked_edges_sql(spec.linked_direction, ctx.table("object_object"))
+
+    return f"""
+        WITH RECURSIVE
+        linked_edges("source_id", "target_id") AS (
+            {linked_edges_sql}
+        ),
+        linked_nodes("ocel_id") AS (
+            SELECT le."target_id"
+            FROM linked_edges le
+            WHERE le."source_id" = {anchor_node}
+              AND le."target_id" <> {anchor_node}
+
+            UNION
+
+            SELECT le."target_id"
+            FROM linked_nodes ln
+            JOIN linked_edges le
+              ON le."source_id" = ln."ocel_id"
+            WHERE le."target_id" <> {anchor_node}
+        )
+        SELECT {select_sql}
+        FROM linked_nodes linked_ids
+        JOIN {render_scope_source(candidate_ctx)}
+          ON linked_ids."ocel_id" = {candidate_alias}."ocel_id"
         WHERE {" AND ".join(predicates)}
     """
 
@@ -310,7 +441,7 @@ def _render_has_object_subquery(
 
 def relation_candidate_kind(kind: RelationKind, current_kind: ExprScopeKind) -> ExprScopeKind:
     match kind:
-        case "related" | "linked":
+        case "cooccurs_with" | "linked":
             return "object_state" if current_kind == "object_state" else "object"
         case "has_event":
             return "event"
@@ -321,7 +452,7 @@ def relation_candidate_kind(kind: RelationKind, current_kind: ExprScopeKind) -> 
 
 def relation_candidate_alias(kind: RelationKind) -> str:
     match kind:
-        case "related":
+        case "cooccurs_with":
             return "ro"
         case "linked":
             return "lo"
@@ -330,6 +461,62 @@ def relation_candidate_alias(kind: RelationKind) -> str:
         case "has_object":
             return "ho"
     assert_never(kind)
+
+
+def _linked_match_sql(direction: LinkedDirection, node_sql: str) -> str:
+    match direction:
+        case "bidirectional":
+            return f'(oo."ocel_source_id" = {node_sql} OR oo."ocel_target_id" = {node_sql})'
+        case "outgoing":
+            return f'oo."ocel_source_id" = {node_sql}'
+        case "incoming":
+            return f'oo."ocel_target_id" = {node_sql}'
+    assert_never(direction)
+
+
+def _linked_neighbor_sql(direction: LinkedDirection, node_sql: str) -> str:
+    match direction:
+        case "bidirectional":
+            return (
+                f'CASE WHEN oo."ocel_source_id" = {node_sql} '
+                f'THEN oo."ocel_target_id" ELSE oo."ocel_source_id" END'
+            )
+        case "outgoing":
+            return 'oo."ocel_target_id"'
+        case "incoming":
+            return 'oo."ocel_source_id"'
+    assert_never(direction)
+
+
+def _linked_edges_sql(direction: LinkedDirection, object_object_sql: str) -> str:
+    match direction:
+        case "bidirectional":
+            return f"""
+                SELECT
+                    oo."ocel_source_id" AS "source_id",
+                    oo."ocel_target_id" AS "target_id"
+                FROM {object_object_sql} oo
+                UNION
+                SELECT
+                    oo."ocel_target_id" AS "source_id",
+                    oo."ocel_source_id" AS "target_id"
+                FROM {object_object_sql} oo
+            """
+        case "outgoing":
+            return f"""
+                SELECT
+                    oo."ocel_source_id" AS "source_id",
+                    oo."ocel_target_id" AS "target_id"
+                FROM {object_object_sql} oo
+            """
+        case "incoming":
+            return f"""
+                SELECT
+                    oo."ocel_target_id" AS "source_id",
+                    oo."ocel_source_id" AS "target_id"
+                FROM {object_object_sql} oo
+            """
+    assert_never(direction)
 
 
 def render_scope_source(ctx: CompileContext) -> str:
@@ -341,7 +528,6 @@ def render_scope_source(ctx: CompileContext) -> str:
         case "object_state":
             return (
                 f'({render_object_state_source(
-                    ctx.table_refs,
                     ctx.object_change_columns,
                     mode=ctx.object_state_mode or "latest",
                     as_of=ctx.object_state_as_of,
@@ -352,7 +538,6 @@ def render_scope_source(ctx: CompileContext) -> str:
                 raise ValueError("object_state_at_event scope requires an event alias")
             return (
                 f'LATERAL ({render_object_state_source_at_event(
-                    ctx.table_refs,
                     ctx.object_change_columns,
                     event_alias=ctx.event_alias,
                 )}) {ctx.alias}'
@@ -366,3 +551,86 @@ def render_scope_source(ctx: CompileContext) -> str:
 def quote_ident(name: str) -> str:
     escaped = name.replace('"', '""')
     return f'"{escaped}"'
+
+
+def _render_scalar_value(value: Expr | CompareValue, ctx: CompileContext) -> str:
+    if isinstance(value, Expr):
+        return render_expr(value, ctx)
+    return render_compare_value(value, ctx)
+
+
+def _render_scalar_function(expr: FunctionExpr, ctx: CompileContext) -> str:
+    rendered_args = [
+        _render_scalar_value(value, ctx)
+        for value in expr.args
+    ]
+
+    match expr.name:
+        case "coalesce":
+            return f"COALESCE({', '.join(rendered_args)})"
+        case "lower":
+            return f"LOWER({rendered_args[0]})"
+        case "upper":
+            return f"UPPER({rendered_args[0]})"
+        case "abs":
+            return f"ABS({rendered_args[0]})"
+        case "round":
+            return f"ROUND({rendered_args[0]}, {rendered_args[1]})"
+        case "year":
+            return f"EXTRACT(YEAR FROM {rendered_args[0]})"
+        case "month":
+            return f"EXTRACT(MONTH FROM {rendered_args[0]})"
+        case "day":
+            return f"EXTRACT(DAY FROM {rendered_args[0]})"
+        case "date":
+            return f"CAST({rendered_args[0]} AS DATE)"
+        case _:
+            raise TypeError(f"Unsupported scalar function: {expr.name!r}")
+
+
+def _render_window_function_call(
+    expr: WindowFunctionExpr,
+    ctx: CompileContext,
+) -> str:
+    rendered_args = [
+        _render_scalar_value(value, ctx)
+        for value in expr.args
+    ]
+
+    match expr.name:
+        case "lag" | "lead":
+            if not rendered_args:
+                raise ValueError(f"{expr.name}(...) requires an expression argument")
+            pieces = [rendered_args[0]]
+            if expr.offset is not None:
+                pieces.append(str(expr.offset))
+            if expr.default is not None:
+                pieces.append(_render_scalar_value(expr.default, ctx))
+            return f"{expr.name.upper()}({', '.join(pieces)})"
+        case "row_number":
+            return "ROW_NUMBER()"
+        case _:
+            raise TypeError(f"Unsupported window function: {expr.name!r}")
+
+
+def _render_predicate_function(
+    expr: PredicateFunctionExpr,
+    ctx: CompileContext,
+) -> str:
+    rendered_args = [
+        _render_scalar_value(value, ctx)
+        for value in expr.args
+    ]
+
+    match expr.name:
+        case "contains":
+            value_sql, needle_sql = rendered_args
+            return f"(POSITION({needle_sql} IN {value_sql}) > 0)"
+        case "starts_with":
+            value_sql, prefix_sql = rendered_args
+            return f"(LEFT({value_sql}, LENGTH({prefix_sql})) = {prefix_sql})"
+        case "ends_with":
+            value_sql, suffix_sql = rendered_args
+            return f"(RIGHT({value_sql}, LENGTH({suffix_sql})) = {suffix_sql})"
+        case _:
+            raise TypeError(f"Unsupported predicate function: {expr.name!r}")

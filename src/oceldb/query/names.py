@@ -1,7 +1,15 @@
 from __future__ import annotations
 
 from oceldb.ast.aggregation import AvgAgg, CountAgg, CountDistinctAgg, MaxAgg, MinAgg, SumAgg
-from oceldb.ast.base import AliasExpr, CastExpr, Expr
+from oceldb.ast.base import (
+    AliasExpr,
+    BinaryOpExpr,
+    CaseExpr,
+    CastExpr,
+    Expr,
+    FunctionExpr,
+    WindowFunctionExpr,
+)
 from oceldb.ast.field import ColumnExpr
 from oceldb.ast.relation import RelationCountExpr
 
@@ -14,6 +22,26 @@ def output_name(expr: Expr) -> str | None:
             return name
         case CastExpr(expr=inner):
             return output_name(inner)
+        case FunctionExpr(name=name, args=args):
+            if not args:
+                return name
+            inner = args[0]
+            if not isinstance(inner, Expr):
+                return name
+            inner_name = output_name(inner)
+            return name if inner_name is None else f"{name}_{inner_name}"
+        case WindowFunctionExpr(name=name, args=args):
+            if not args:
+                return name
+            inner = args[0]
+            if not isinstance(inner, Expr):
+                return name
+            inner_name = output_name(inner)
+            return name if inner_name is None else f"{name}_{inner_name}"
+        case BinaryOpExpr():
+            return None
+        case CaseExpr():
+            return None
         case CountAgg():
             return "count"
         case CountDistinctAgg(expr=inner):

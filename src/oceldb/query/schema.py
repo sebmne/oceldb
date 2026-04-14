@@ -4,6 +4,7 @@ from dataclasses import dataclass
 from typing import assert_never
 
 from oceldb.ast.base import AliasExpr, Expr
+from oceldb.core.ocel import ocel_available_columns
 from oceldb.query.names import output_name
 from oceldb.query.plan import (
     DistinctPlan,
@@ -13,6 +14,7 @@ from oceldb.query.plan import (
     HavingPlan,
     LimitPlan,
     ProjectPlan,
+    RenamePlan,
     QueryPlan,
     QueryPlanNode,
     SortPlan,
@@ -51,10 +53,14 @@ def analyze_node(
                     "call .latest() or .as_of(timestamp)"
                 )
 
-            columns = dict(query.ocel._available_columns(kind))
             types = selected_types(source)
-            if types and "ocel_type" not in columns:
-                raise ValueError(f"{kind!r} does not support type filtering")
+            columns = dict(
+                ocel_available_columns(
+                    query.ocel,
+                    kind,
+                    selected_types=types or None,
+                )
+            )
             return NodeAnalysis(columns=columns, current_kind=kind)
 
         case FilterPlan(input=inner) | SortPlan(input=inner) | DistinctPlan(input=inner) | LimitPlan(input=inner):
@@ -81,6 +87,15 @@ def analyze_node(
                 columns=derive_output_columns(projections, has_following_ops=has_parent),
                 current_kind=child.current_kind,
             )
+
+        case RenamePlan(input=inner, renames=renames):
+            child = analyze_node(inner, query, has_parent=True)
+            rename_map = dict(renames)
+            columns = {
+                rename_map.get(name, name): sql_type
+                for name, sql_type in child.columns.items()
+            }
+            return NodeAnalysis(columns=columns, current_kind=child.current_kind)
 
         case GroupPlan(input=inner, keys=keys, aggregations=aggregations):
             analyze_node(inner, query, has_parent=True)

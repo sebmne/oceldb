@@ -13,7 +13,6 @@ import duckdb
 from oceldb.core.manifest import LogicalTableName, OCELManifest, QuerySourceKind
 
 if TYPE_CHECKING:
-    from oceldb.inspect.inspector import OCELInspector
     from oceldb.query.root import OCELQueryRoot
 
 
@@ -22,10 +21,9 @@ class OCEL:
     Stable handle for a single on-disk OCEL dataset.
 
     The class owns the DuckDB connection used to query the dataset and exposes
-    the two stable high-level interfaces of the library:
+    the stable query interface of the library:
 
     - `query` for lazy analysis and sublog construction
-    - `inspect` for higher-level descriptive summaries
 
     The canonical oceldb storage format is a directory with these files:
 
@@ -42,6 +40,19 @@ class OCEL:
 
     - `object` contains one row per object identity
     - `object_change` contains temporal object state updates
+
+    `manifest.json` is the canonical storage contract. It always identifies the
+    five logical tables, but only the wide attribute-bearing tables carry
+    attribute metadata:
+
+    - `tables.event.custom_columns` and `tables.event.type_attributes`
+      describe event attributes
+    - `tables.object_change.custom_columns` and
+      `tables.object_change.type_attributes` describe object-history
+      attributes
+    - `tables.object`, `tables.event_object`, and `tables.object_object` do
+      not carry custom attribute metadata in the manifest because those tables
+      do not have logical type-specific attributes in oceldb's representation
 
     Notes:
         `OCEL` intentionally stays thin. It does not materialize the log into
@@ -74,10 +85,6 @@ class OCEL:
         self._manifest = manifest
         self._tempdir = tempdir
         self._closed = False
-        self._table_refs: dict[LogicalTableName, str] = {
-            table_name: table_name
-            for table_name in manifest.tables
-        }
 
     @property
     def path(self) -> Path:
@@ -98,17 +105,6 @@ class OCEL:
         return self._manifest
 
     @cached_property
-    def inspect(self) -> OCELInspector:
-        """
-        Access the inspection helpers layered on top of the core DSL.
-
-        The returned inspector is cached per handle.
-        """
-        from oceldb.inspect.inspector import OCELInspector
-
-        return OCELInspector(self)
-
-    @cached_property
     def query(self) -> OCELQueryRoot:
         """
         Return the root object for the lazy oceldb query DSL.
@@ -127,7 +123,9 @@ class OCEL:
         Args:
             path: Directory containing the canonical oceldb files:
 
-                - `manifest.json`: storage metadata and logical table schemas
+                - `manifest.json`: storage metadata and logical table schemas.
+                  Only `event` and `object_change` carry custom attribute
+                  metadata in the manifest.
                 - `event.parquet`: event rows with core event columns and
                   custom event attributes
                 - `object.parquet`: object identities with one row per object
@@ -174,6 +172,17 @@ class OCEL:
         - `object_object` contains object-to-object relation edges with
           `ocel_source_id` and `ocel_target_id`.
 
+        Manifest interpretation:
+
+        - `ocel.manifest.table("event").custom_columns` and
+          `type_attributes` describe the event table's wide custom columns.
+        - `ocel.manifest.table("object_change").custom_columns` and
+          `type_attributes` describe the object-history table's wide custom
+          columns.
+        - `object`, `event_object`, and `object_object` expose only their core
+          columns. In the manifest these tables intentionally do not declare
+          custom columns or type-attribute ownership.
+
         Practical implications:
 
         - Query `object` when you need identities or object counts.
@@ -183,11 +192,14 @@ class OCEL:
           as of a timestamp.
 
         Use `ocel.manifest.table(name).columns` to inspect the exact available
-        columns for each logical table, including custom event columns and
-        custom object-history columns.
+        columns for each logical table. For wide event and object-history
+        tables, `ocel.manifest.table(name).type_attributes` records which
+        custom attributes belong to which OCEL type.
 
         This is an advanced escape hatch. Prefer the DSL for library-facing
-        features so analysis logic remains backend-controlled.
+        features so analysis logic remains backend-controlled. For descriptive
+        summaries and mined process models, use the pure functions in
+        `oceldb.inspect` and `oceldb.discovery`.
 
         Args:
             query: SQL string executed against the internal DuckDB connection.
@@ -216,30 +228,6 @@ class OCEL:
         from oceldb.io.write import write_ocel
 
         return write_ocel(self, target, overwrite=overwrite)
-
-    def _available_columns(self, table_name: QuerySourceKind | str) -> dict[str, str]:
-        if table_name in {"object_state", "object_state_at_event"}:
-            return {
-                **self._manifest.table("object").columns,
-                "ocel_time": "TIMESTAMP",
-                **self._manifest.table("object_change").custom_columns,
-            }
-        if table_name == "event":
-            return self._manifest.table("event").columns
-        if table_name == "object":
-            return self._manifest.table("object").columns
-        if table_name == "object_change":
-            return self._manifest.table("object_change").columns
-        if table_name == "event_object":
-            return self._manifest.table("event_object").columns
-        if table_name == "object_object":
-            return self._manifest.table("object_object").columns
-        raise TypeError(f"Unsupported table name: {table_name!r}")
-
-    def _table_sql(self, table_name: LogicalTableName) -> str:
-        alias = self._table_refs[table_name]
-        escaped = alias.replace('"', '""')
-        return f'"{escaped}"'
 
     def close(self) -> None:
         """
@@ -272,3 +260,58 @@ class OCEL:
 
     def __repr__(self) -> str:
         return f"OCEL(path='{self._path.name}')"
+
+
+def ocel_connection(ocel: OCEL) -> duckdb.DuckDBPyConnection:
+    """Return the live DuckDB connection owned by an OCEL handle."""
+    return ocel._con  # pyright: ignore[reportPrivateUsage]
+
+
+def ocel_available_columns(
+    ocel: OCEL,
+    table_name: QuerySourceKind | str,
+    *,
+    selected_types: tuple[str, ...] | None = None,
+) -> dict[str, str]:
+    def _custom_columns(name: LogicalTableName) -> dict[str, str]:
+        schema = ocel.manifest.table(name)
+        if selected_types is None:
+            return dict(schema.custom_columns)
+        return schema.custom_columns_for_types(selected_types)
+
+    if table_name in {"object_state", "object_state_at_event"}:
+        return {
+            **ocel.manifest.table("object").columns,
+            "ocel_time": "TIMESTAMP",
+            **_custom_columns("object_change"),
+        }
+    if table_name == "event":
+        return {
+            **dict(ocel.manifest.table("event").core_columns),
+            **_custom_columns("event"),
+        }
+    if table_name == "object":
+        return ocel.manifest.table("object").columns
+    if table_name == "event_occurrence":
+        return {
+            "ocel_event_id": "VARCHAR",
+            "ocel_event_type": "VARCHAR",
+            "ocel_event_time": "TIMESTAMP",
+            "ocel_object_id": "VARCHAR",
+            "ocel_object_type": "VARCHAR",
+        }
+    if table_name == "object_change":
+        return {
+            **dict(ocel.manifest.table("object_change").core_columns),
+            **_custom_columns("object_change"),
+        }
+    if table_name == "event_object":
+        return ocel.manifest.table("event_object").columns
+    if table_name == "object_object":
+        return ocel.manifest.table("object_object").columns
+    raise TypeError(f"Unsupported table name: {table_name!r}")
+
+
+def logical_table_sql(table_name: LogicalTableName) -> str:
+    escaped = table_name.replace('"', '""')
+    return f'"{escaped}"'

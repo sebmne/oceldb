@@ -24,7 +24,7 @@ def read_ocel(path: str | Path) -> OCEL:
             f"OCEL source must be a directory in canonical oceldb layout: {source_path}"
         )
 
-    return _open_ocel_directory(source_path)
+    return open_ocel_directory(source_path)
 
 
 def _validate_directory_layout(path: Path) -> None:
@@ -53,20 +53,17 @@ def _validate_loaded_tables(
             )
 
 
-def _open_ocel_directory(
+def open_ocel_directory(
     data_path: Path,
     *,
     source_path: Path | None = None,
     tempdir: TemporaryDirectory[str] | None = None,
 ) -> OCEL:
     manifest_path = data_path / MANIFEST_FILE
-    if manifest_path.exists():
-        manifest = load_manifest(manifest_path)
-    else:
-        _validate_directory_layout(data_path)
-        manifest = load_manifest(manifest_path)
-
+    manifest = load_manifest(manifest_path) if manifest_path.exists() else None
     _validate_directory_layout(data_path)
+    if manifest is None:
+        manifest = load_manifest(manifest_path)
     source = data_path if source_path is None else source_path
 
     con = duckdb.connect()

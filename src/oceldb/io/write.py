@@ -5,7 +5,7 @@ from __future__ import annotations
 import shutil
 from pathlib import Path
 
-from oceldb.core.ocel import OCEL
+from oceldb.core.ocel import OCEL, ocel_connection
 from oceldb.io._manifest import (
     LOGICAL_TABLES,
     MANIFEST_FILE,
@@ -56,11 +56,12 @@ def _write_directory(ocel: OCEL, target_dir: Path) -> None:
             _copy_table(ocel, table_name, target_dir / f"{table_name}.parquet")
 
         manifest = build_manifest_from_tables(
-            ocel._con,
+            ocel_connection(ocel),
             oceldb_version=ocel.manifest.oceldb_version,
             source=ocel.manifest.source,
             created_at=ocel.manifest.created_at,
             drop_empty_custom_columns=False,
+            source_manifest=ocel.manifest,
         )
         write_manifest(target_dir / MANIFEST_FILE, manifest)
     except Exception:
@@ -71,7 +72,7 @@ def _write_directory(ocel: OCEL, target_dir: Path) -> None:
 
 def _copy_table(ocel: OCEL, table_name: str, target_file: Path) -> None:
     escaped_target = str(target_file).replace("'", "''")
-    ocel._con.execute(f"""
+    ocel_connection(ocel).execute(f"""
         COPY (
             SELECT *
             FROM "{table_name}"

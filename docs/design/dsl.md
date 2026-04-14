@@ -8,6 +8,12 @@ It is the design contract the implementation should converge to. The current
 runtime already implements parts of this design, but some details described
 here are still target behavior rather than completed behavior.
 
+For the boundary between direct log inspection and mined analytical artifacts,
+see [`inspection-vs-discovery.md`](./inspection-vs-discovery.md).
+
+For the planned state-oriented lifecycle discovery artifact, see
+[`object-lifecycle.md`](./object-lifecycle.md).
+
 ## Goals
 
 The DSL should be:
@@ -46,6 +52,7 @@ time.
 - Keep scope validation in the compiler where necessary.
 - Separate expression structure from logical planning.
 - Make materialization legality an explicit property of the plan.
+- Keep higher-level inspection and discovery helpers outside `OCEL` itself.
 
 ## Public Query Roots
 
@@ -101,7 +108,7 @@ Core builders:
 
 Relation builders:
 
-- `related(object_type: str)`
+- `cooccurs_with(object_type: str)`
 - `linked(object_type: str)`
 - `has_event(event_type: str)`
 - `has_object(object_type: str)`
@@ -177,13 +184,13 @@ only in specific scopes.
 
 These are valid only in object-rooted scopes:
 
-- `related(object_type)`
+- `cooccurs_with(object_type)`
 - `linked(object_type)`
 - `has_event(event_type)`
 
 Semantics:
 
-- `related(object_type)` means objects connected through shared events
+- `cooccurs_with(object_type)` means objects connected through shared events
 - `linked(object_type)` means objects connected through `object_object`
 - `has_event(event_type)` means events attached through `event_object`
 
@@ -193,8 +200,8 @@ Semantics:
 
 Semantics:
 
-- it navigates from an event to related objects through `event_object`
-- if a predicate is applied to the related object, that predicate should see
+- it navigates from an event to co-occurring objects through `event_object`
+- if a predicate is applied to the co-occurring object, that predicate should see
   object state at event time, not latest object state
 
 This introduces an additional internal scope kind:

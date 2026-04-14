@@ -1,9 +1,12 @@
 from oceldb.core.manifest import OCELManifest, TableSchema
 from oceldb.core.ocel import OCEL
 from oceldb.dsl import (
+    abs_,
     asc,
     avg,
     col,
+    coalesce,
+    cooccurs_with,
     count,
     count_distinct,
     desc,
@@ -13,18 +16,23 @@ from oceldb.dsl import (
     lit,
     max_,
     min_,
-    related,
+    row_number,
+    round_,
     sum_,
+    when,
 )
-from oceldb.io import convert_sqlite, write_ocel
+from oceldb.io import convert_sqlite
 
 __all__ = [
     "OCEL",
     "OCELManifest",
     "TableSchema",
+    "abs_",
     "asc",
     "avg",
     "col",
+    "coalesce",
+    "cooccurs_with",
     "convert_sqlite",
     "count",
     "count_distinct",
@@ -35,7 +43,8 @@ __all__ = [
     "lit",
     "max_",
     "min_",
-    "related",
+    "row_number",
+    "round_",
     "sum_",
-    "write_ocel",
+    "when",
 ]

@@ -5,6 +5,7 @@ from __future__ import annotations
 import csv
 import sqlite3
 import shutil
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from importlib.metadata import PackageNotFoundError, version
 from pathlib import Path
@@ -24,6 +25,12 @@ _SOURCE_SCHEMA = "ocel_source"
 _CSV_NULL_TOKEN = "__oceldb_null__"
 _EVENT_BASE_COLUMNS = {"ocel_id", "ocel_type", "ocel_time"}
 _OBJECT_BASE_COLUMNS = {"ocel_id", "ocel_type", "ocel_time", "ocel_changed_field"}
+
+
+@dataclass(frozen=True)
+class _ResolvedEntitySchema:
+    custom_columns: dict[str, str]
+    type_attributes: dict[str, tuple[str, ...]]
 
 
 def convert_sqlite(
@@ -80,8 +87,16 @@ def _convert_to_directory(source_path: Path, target_dir: Path) -> None:
             if not _attach_sqlite_source(con, source_path):
                 _stage_source_tables(sqlite_con, con, source_schema)
 
-            event_schema = _resolve_custom_schema(source_schema, event_types, kind="event")
-            object_schema = _resolve_custom_schema(source_schema, object_types, kind="object")
+            event_schema = _resolve_entity_schema(
+                source_schema,
+                event_types,
+                kind="event",
+            )
+            object_schema = _resolve_entity_schema(
+                source_schema,
+                object_types,
+                kind="object",
+            )
 
             _copy_relation_table(con, "event_object", target_dir / "event_object.parquet")
             _copy_relation_table(
@@ -97,7 +112,7 @@ def _convert_to_directory(source_path: Path, target_dir: Path) -> None:
                 base_alias="e",
                 payload_prefix="event",
                 type_rows=event_types,
-                custom_schema=event_schema,
+                custom_schema=event_schema.custom_columns,
                 base_columns=_EVENT_BASE_COLUMNS,
             )
             _export_entities(
@@ -107,7 +122,7 @@ def _convert_to_directory(source_path: Path, target_dir: Path) -> None:
                 base_alias="o",
                 payload_prefix="object",
                 type_rows=object_types,
-                custom_schema=object_schema,
+                custom_schema=object_schema.custom_columns,
                 base_columns=_OBJECT_BASE_COLUMNS,
             )
             _export_object_identities(
@@ -124,7 +139,8 @@ def _convert_to_directory(source_path: Path, target_dir: Path) -> None:
                 "event": TableSchema(
                     name="event",
                     core_columns=CORE_COLUMNS["event"],
-                    custom_columns=event_schema,
+                    custom_columns=event_schema.custom_columns,
+                    type_attributes=event_schema.type_attributes,
                 ),
                 "object": TableSchema(
                     name="object",
@@ -133,7 +149,8 @@ def _convert_to_directory(source_path: Path, target_dir: Path) -> None:
                 "object_change": TableSchema(
                     name="object_change",
                     core_columns=CORE_COLUMNS["object_change"],
-                    custom_columns=object_schema,
+                    custom_columns=object_schema.custom_columns,
+                    type_attributes=object_schema.type_attributes,
                 ),
                 "event_object": TableSchema(
                     name="event_object",
@@ -152,26 +169,36 @@ def _convert_to_directory(source_path: Path, target_dir: Path) -> None:
         raise
 
 
-def _resolve_custom_schema(
+def _resolve_entity_schema(
     source_schema: dict[str, dict[str, str]],
     type_rows: list[tuple[str, str]],
     *,
     kind: str,
-) -> dict[str, str]:
+) -> _ResolvedEntitySchema:
     discovered: dict[str, list[str]] = {}
+    type_attributes: dict[str, tuple[str, ...]] = {}
 
-    for _, type_map in type_rows:
+    for type_name, type_map in type_rows:
         table_name = f'{kind}_{type_map}'
         payload_columns = source_schema[table_name]
+        attributes = tuple(
+            name
+            for name in payload_columns
+            if name not in _base_columns_for_kind(kind)
+        )
+        type_attributes[type_name] = attributes
         for name, sql_type in payload_columns.items():
             if name in _base_columns_for_kind(kind):
                 continue
             discovered.setdefault(name, []).append(_normalize_type(sql_type))
 
-    return {
-        name: _resolve_common_type(types)
-        for name, types in sorted(discovered.items())
-    }
+    return _ResolvedEntitySchema(
+        custom_columns={
+            name: _resolve_common_type(types)
+            for name, types in sorted(discovered.items())
+        },
+        type_attributes=type_attributes,
+    )
 
 
 def _export_entities(

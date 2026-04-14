@@ -33,21 +33,4 @@ def _type_attributes(
     table_name: Literal["event", "object_change"],
     type_name: str,
 ) -> List[str]:
-    custom_columns = sorted(ocel.manifest.table(table_name).custom_columns)
-    escaped_type = type_name.replace("'", "''")
-
-    present: list[str] = []
-    for column_name in custom_columns:
-        escaped_column = column_name.replace('"', '""')
-        row = ocel.sql(f"""
-            SELECT EXISTS(
-                SELECT 1
-                FROM "{table_name}"
-                WHERE "ocel_type" = '{escaped_type}'
-                  AND "{escaped_column}" IS NOT NULL
-            )
-        """).fetchone()
-        if row and bool(row[0]):
-            present.append(column_name)
-
-    return present
+    return sorted(ocel.manifest.table(table_name).attributes_for_type(type_name))

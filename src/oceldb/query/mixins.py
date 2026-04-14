@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Self, overload
+from typing import TYPE_CHECKING, Any, Mapping, Self, overload
 
 import duckdb
 
@@ -9,16 +9,21 @@ from oceldb.ast.base import (
     AggregateExpr,
     AliasExpr,
     AndExpr,
+    BinaryOpExpr,
     BoolExpr,
+    CaseExpr,
     CastExpr,
     CompareExpr,
     Expr,
+    FunctionExpr,
     InExpr,
     NotExpr,
     OrExpr,
+    PredicateFunctionExpr,
     ScalarExpr,
     SortExpr,
     UnaryPredicate,
+    WindowFunctionExpr,
 )
 from oceldb.ast.relation import RelationAllExpr, RelationCountExpr, RelationExistsExpr
 from oceldb.core.ocel import OCEL
@@ -32,6 +37,7 @@ from oceldb.query.plan import (
     ProjectPlan,
     QueryPlan,
     QueryPlanNode,
+    RenamePlan,
     SortPlan,
 )
 
@@ -104,6 +110,11 @@ class WhereMixin(QueryBase):
                 raise TypeError(
                     "where(...) does not accept aggregate expressions; use group_by(...).agg(...)"
                 )
+            if _contains_window(predicate):
+                raise TypeError(
+                    "where(...) does not accept window expressions directly; "
+                    "use with_columns(...) and filter on the resulting alias"
+                )
             validated.append(predicate)
         return self._with_node(FilterPlan(self._plan.node, tuple(validated)))
 
@@ -126,6 +137,11 @@ class HavingMixin(QueryBase):
                 raise TypeError(
                     "having(...) does not accept aggregate expressions directly; "
                     "refer to grouped output columns or aliases instead"
+                )
+            if _contains_window(predicate):
+                raise TypeError(
+                    "having(...) does not accept window expressions directly; "
+                    "materialize the window result into a column first"
                 )
             validated.append(predicate)
         return self._with_node(HavingPlan(self._plan.node, tuple(validated)))
@@ -208,7 +224,57 @@ class GroupByMixin(QueryBase):
         groupings = _coerce_scalar_exprs(exprs, context="group_by(...)")
         if not groupings:
             raise ValueError("group_by(...) requires at least one expression")
+        if any(_contains_window(expr) for expr in groupings):
+            raise TypeError(
+                "group_by(...) does not accept window expressions"
+            )
         return GroupedRows(self._plan, groupings)
+
+
+class RenameMixin(QueryBase):
+    def rename(
+        self,
+        mapping: Mapping[str, str] | None = None,
+        /,
+        **named_mapping: str,
+    ) -> Self:
+        from oceldb.query.compiler import query_output_columns
+
+        rename_map: dict[str, str] = {}
+        if mapping is not None:
+            rename_map.update(mapping)
+        rename_map.update(named_mapping)
+        if not rename_map:
+            return self
+
+        columns = query_output_columns(self._plan)
+        unknown = sorted(name for name in rename_map if name not in columns)
+        if unknown:
+            raise ValueError(
+                "rename(...) received unknown columns: "
+                + ", ".join(repr(name) for name in unknown)
+            )
+
+        for source, target in rename_map.items():
+            if not target:
+                raise ValueError(f"rename(...) target for {source!r} must not be empty")
+
+        seen: set[str] = set()
+        for name in columns:
+            final_name = rename_map.get(name, name)
+            if final_name in seen:
+                raise ValueError(
+                    "rename(...) would produce duplicate output columns; "
+                    f"conflicting target {final_name!r}"
+                )
+            seen.add(final_name)
+
+        return self._with_node(
+            RenamePlan(
+                self._plan.node,
+                tuple(rename_map.items()),
+            )
+        )
 
 
 class MaterializeMixin(QueryBase):
@@ -352,6 +418,42 @@ def _contains_aggregate(expr: Expr) -> bool:
     match expr:
         case AliasExpr(expr=inner) | CastExpr(expr=inner) | UnaryPredicate(expr=inner) | NotExpr(expr=inner):
             return _contains_aggregate(inner)
+        case BinaryOpExpr(left=left, right=right):
+            return (
+                isinstance(left, Expr) and _contains_aggregate(left)
+            ) or (
+                isinstance(right, Expr) and _contains_aggregate(right)
+            )
+        case FunctionExpr(args=args) | PredicateFunctionExpr(args=args):
+            return any(
+                isinstance(value, Expr) and _contains_aggregate(value)
+                for value in args
+            )
+        case WindowFunctionExpr(args=args, default=default, window=window):
+            return any(
+                isinstance(value, Expr) and _contains_aggregate(value)
+                for value in args
+            ) or (
+                isinstance(default, Expr) and _contains_aggregate(default)
+            ) or (
+                window is not None and (
+                    any(_contains_aggregate(value) for value in window.partition_by)
+                    or any(
+                        isinstance(ordering.expr, Expr)
+                        and _contains_aggregate(ordering.expr)
+                        for ordering in window.order_by
+                    )
+                )
+            )
+        case CaseExpr(branches=branches, default=default):
+            return any(
+                _contains_aggregate(condition) or (
+                    isinstance(value, Expr) and _contains_aggregate(value)
+                )
+                for condition, value in branches
+            ) or (
+                isinstance(default, Expr) and _contains_aggregate(default)
+            )
         case CompareExpr(left=left, right=right):
             return _contains_aggregate(left) or (
                 isinstance(right, Expr) and _contains_aggregate(right)
@@ -367,6 +469,54 @@ def _contains_aggregate(expr: Expr) -> bool:
             return any(_contains_aggregate(value) for value in spec.filters)
         case RelationAllExpr(spec=spec, condition=condition):
             return any(_contains_aggregate(value) for value in spec.filters) or _contains_aggregate(
+                condition
+            )
+        case _:
+            return False
+
+
+def _contains_window(expr: Expr) -> bool:
+    if isinstance(expr, WindowFunctionExpr):
+        return True
+
+    match expr:
+        case AliasExpr(expr=inner) | CastExpr(expr=inner) | UnaryPredicate(expr=inner) | NotExpr(expr=inner):
+            return _contains_window(inner)
+        case BinaryOpExpr(left=left, right=right):
+            return (
+                isinstance(left, Expr) and _contains_window(left)
+            ) or (
+                isinstance(right, Expr) and _contains_window(right)
+            )
+        case FunctionExpr(args=args) | PredicateFunctionExpr(args=args):
+            return any(
+                isinstance(value, Expr) and _contains_window(value)
+                for value in args
+            )
+        case CaseExpr(branches=branches, default=default):
+            return any(
+                _contains_window(condition) or (
+                    isinstance(value, Expr) and _contains_window(value)
+                )
+                for condition, value in branches
+            ) or (
+                isinstance(default, Expr) and _contains_window(default)
+            )
+        case CompareExpr(left=left, right=right):
+            return _contains_window(left) or (
+                isinstance(right, Expr) and _contains_window(right)
+            )
+        case AndExpr(left=left, right=right) | OrExpr(left=left, right=right):
+            return _contains_window(left) or _contains_window(right)
+        case InExpr(expr=inner, values=values):
+            return _contains_window(inner) or any(
+                isinstance(value, Expr) and _contains_window(value)
+                for value in values
+            )
+        case RelationExistsExpr(spec=spec) | RelationCountExpr(spec=spec):
+            return any(_contains_window(value) for value in spec.filters)
+        case RelationAllExpr(spec=spec, condition=condition):
+            return any(_contains_window(value) for value in spec.filters) or _contains_window(
                 condition
             )
         case _:
