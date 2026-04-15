@@ -9,6 +9,22 @@ from oceldb.core.manifest import OCELManifest, TableSchema
 from oceldb.core.ocel import OCEL
 from oceldb.sql.context import CompileContext
 
+EVENT_OBJECT_CORE_COLUMNS = {
+    "ocel_event_id": "VARCHAR",
+    "ocel_object_id": "VARCHAR",
+    "ocel_qualifier": "VARCHAR",
+}
+OBJECT_OBJECT_CORE_COLUMNS = {
+    "ocel_source_id": "VARCHAR",
+    "ocel_target_id": "VARCHAR",
+    "ocel_qualifier": "VARCHAR",
+}
+
+
+def _add_relation_qualifier_columns(con: duckdb.DuckDBPyConnection) -> None:
+    con.execute('ALTER TABLE "event_object" ADD COLUMN ocel_qualifier VARCHAR')
+    con.execute('ALTER TABLE "object_object" ADD COLUMN ocel_qualifier VARCHAR')
+
 
 @pytest.fixture()
 def ctx() -> CompileContext:
@@ -80,6 +96,7 @@ def ocel(tmp_path: Path) -> OCEL:
             ('o2', 'o3')
         ) AS t(ocel_source_id, ocel_target_id)
     """)
+    _add_relation_qualifier_columns(con)
 
     manifest = OCELManifest(
         oceldb_version="0.3.0",
@@ -129,17 +146,11 @@ def ocel(tmp_path: Path) -> OCEL:
             ),
             "event_object": TableSchema(
                 name="event_object",
-                core_columns={
-                    "ocel_event_id": "VARCHAR",
-                    "ocel_object_id": "VARCHAR",
-                },
+                core_columns=EVENT_OBJECT_CORE_COLUMNS,
             ),
             "object_object": TableSchema(
                 name="object_object",
-                core_columns={
-                    "ocel_source_id": "VARCHAR",
-                    "ocel_target_id": "VARCHAR",
-                },
+                core_columns=OBJECT_OBJECT_CORE_COLUMNS,
             ),
         },
     )
@@ -196,6 +207,7 @@ def ocel_with_object_changes(tmp_path: Path) -> OCEL:
             ('o1', 'o2')
         ) AS t(ocel_source_id, ocel_target_id)
     """)
+    _add_relation_qualifier_columns(con)
 
     manifest = OCELManifest(
         oceldb_version="0.3.0",
@@ -245,17 +257,11 @@ def ocel_with_object_changes(tmp_path: Path) -> OCEL:
             ),
             "event_object": TableSchema(
                 name="event_object",
-                core_columns={
-                    "ocel_event_id": "VARCHAR",
-                    "ocel_object_id": "VARCHAR",
-                },
+                core_columns=EVENT_OBJECT_CORE_COLUMNS,
             ),
             "object_object": TableSchema(
                 name="object_object",
-                core_columns={
-                    "ocel_source_id": "VARCHAR",
-                    "ocel_target_id": "VARCHAR",
-                },
+                core_columns=OBJECT_OBJECT_CORE_COLUMNS,
             ),
         },
     )
@@ -308,6 +314,7 @@ def ocel_with_orphan_object(tmp_path: Path) -> OCEL:
         ) AS t(ocel_source_id, ocel_target_id)
         WHERE FALSE
     """)
+    _add_relation_qualifier_columns(con)
 
     manifest = OCELManifest(
         oceldb_version="0.3.0",
@@ -355,17 +362,11 @@ def ocel_with_orphan_object(tmp_path: Path) -> OCEL:
             ),
             "event_object": TableSchema(
                 name="event_object",
-                core_columns={
-                    "ocel_event_id": "VARCHAR",
-                    "ocel_object_id": "VARCHAR",
-                },
+                core_columns=EVENT_OBJECT_CORE_COLUMNS,
             ),
             "object_object": TableSchema(
                 name="object_object",
-                core_columns={
-                    "ocel_source_id": "VARCHAR",
-                    "ocel_target_id": "VARCHAR",
-                },
+                core_columns=OBJECT_OBJECT_CORE_COLUMNS,
             ),
         },
     )
@@ -417,6 +418,7 @@ def ocel_with_stateless_object(tmp_path: Path) -> OCEL:
         ) AS t(ocel_source_id, ocel_target_id)
         WHERE FALSE
     """)
+    _add_relation_qualifier_columns(con)
 
     manifest = OCELManifest(
         oceldb_version="0.3.0",
@@ -464,17 +466,11 @@ def ocel_with_stateless_object(tmp_path: Path) -> OCEL:
             ),
             "event_object": TableSchema(
                 name="event_object",
-                core_columns={
-                    "ocel_event_id": "VARCHAR",
-                    "ocel_object_id": "VARCHAR",
-                },
+                core_columns=EVENT_OBJECT_CORE_COLUMNS,
             ),
             "object_object": TableSchema(
                 name="object_object",
-                core_columns={
-                    "ocel_source_id": "VARCHAR",
-                    "ocel_target_id": "VARCHAR",
-                },
+                core_columns=OBJECT_OBJECT_CORE_COLUMNS,
             ),
         },
     )
@@ -537,6 +533,7 @@ def ocel_with_link_graph(tmp_path: Path) -> OCEL:
             ('o3', 'o4')
         ) AS t(ocel_source_id, ocel_target_id)
     """)
+    _add_relation_qualifier_columns(con)
 
     manifest = OCELManifest(
         oceldb_version="0.3.0",
@@ -585,17 +582,11 @@ def ocel_with_link_graph(tmp_path: Path) -> OCEL:
             ),
             "event_object": TableSchema(
                 name="event_object",
-                core_columns={
-                    "ocel_event_id": "VARCHAR",
-                    "ocel_object_id": "VARCHAR",
-                },
+                core_columns=EVENT_OBJECT_CORE_COLUMNS,
             ),
             "object_object": TableSchema(
                 name="object_object",
-                core_columns={
-                    "ocel_source_id": "VARCHAR",
-                    "ocel_target_id": "VARCHAR",
-                },
+                core_columns=OBJECT_OBJECT_CORE_COLUMNS,
             ),
         },
     )
@@ -658,6 +649,7 @@ def ocel_with_object_lifecycle(tmp_path: Path) -> OCEL:
         ) AS t(ocel_source_id, ocel_target_id)
         WHERE FALSE
     """)
+    _add_relation_qualifier_columns(con)
 
     manifest = OCELManifest(
         oceldb_version="0.3.0",
@@ -705,17 +697,11 @@ def ocel_with_object_lifecycle(tmp_path: Path) -> OCEL:
             ),
             "event_object": TableSchema(
                 name="event_object",
-                core_columns={
-                    "ocel_event_id": "VARCHAR",
-                    "ocel_object_id": "VARCHAR",
-                },
+                core_columns=EVENT_OBJECT_CORE_COLUMNS,
             ),
             "object_object": TableSchema(
                 name="object_object",
-                core_columns={
-                    "ocel_source_id": "VARCHAR",
-                    "ocel_target_id": "VARCHAR",
-                },
+                core_columns=OBJECT_OBJECT_CORE_COLUMNS,
             ),
         },
     )
@@ -769,6 +755,7 @@ def ocel_with_conflicting_lifecycle_changes(tmp_path: Path) -> OCEL:
         ) AS t(ocel_source_id, ocel_target_id)
         WHERE FALSE
     """)
+    _add_relation_qualifier_columns(con)
 
     manifest = OCELManifest(
         oceldb_version="0.3.0",
@@ -813,17 +800,11 @@ def ocel_with_conflicting_lifecycle_changes(tmp_path: Path) -> OCEL:
             ),
             "event_object": TableSchema(
                 name="event_object",
-                core_columns={
-                    "ocel_event_id": "VARCHAR",
-                    "ocel_object_id": "VARCHAR",
-                },
+                core_columns=EVENT_OBJECT_CORE_COLUMNS,
             ),
             "object_object": TableSchema(
                 name="object_object",
-                core_columns={
-                    "ocel_source_id": "VARCHAR",
-                    "ocel_target_id": "VARCHAR",
-                },
+                core_columns=OBJECT_OBJECT_CORE_COLUMNS,
             ),
         },
     )
@@ -878,6 +859,7 @@ def ocel_with_simultaneous_object_updates(tmp_path: Path) -> OCEL:
         ) AS t(ocel_source_id, ocel_target_id)
         WHERE FALSE
     """)
+    _add_relation_qualifier_columns(con)
 
     manifest = OCELManifest(
         oceldb_version="0.3.0",
@@ -923,17 +905,11 @@ def ocel_with_simultaneous_object_updates(tmp_path: Path) -> OCEL:
             ),
             "event_object": TableSchema(
                 name="event_object",
-                core_columns={
-                    "ocel_event_id": "VARCHAR",
-                    "ocel_object_id": "VARCHAR",
-                },
+                core_columns=EVENT_OBJECT_CORE_COLUMNS,
             ),
             "object_object": TableSchema(
                 name="object_object",
-                core_columns={
-                    "ocel_source_id": "VARCHAR",
-                    "ocel_target_id": "VARCHAR",
-                },
+                core_columns=OBJECT_OBJECT_CORE_COLUMNS,
             ),
         },
     )

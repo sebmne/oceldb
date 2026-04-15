@@ -2,16 +2,15 @@
 
 from __future__ import annotations
 
-import importlib
-from typing import TYPE_CHECKING, Any, cast
+from typing import TYPE_CHECKING, Any
 
 from oceldb.core.ocel import OCEL
 
 if TYPE_CHECKING:
-    from pm4py.objects.ocel.obj import OCEL as PM4PyOCEL
+    import pm4py
 
 
-def to_pm4py(ocel: OCEL) -> "PM4PyOCEL":
+def to_pm4py(ocel: OCEL) -> "pm4py.objects.ocel.obj.OCEL":
     """
     Convert an `oceldb.OCEL` handle into a PM4Py `OCEL` object.
 
@@ -19,17 +18,15 @@ def to_pm4py(ocel: OCEL) -> "PM4PyOCEL":
     The resulting PM4Py object uses PM4Py's default OCEL column names.
     """
     try:
-        pd = importlib.import_module("pandas")
-        PM4PyOCEL = importlib.import_module("pm4py.objects.ocel.obj").OCEL
+        import pandas as pd
+        import pm4py
     except ImportError as exc:
         raise ImportError(
             "PM4Py interoperability requires optional dependencies. "
             "Install them with `pip install oceldb[pm4py]`."
         ) from exc
 
-    return cast(
-        "PM4PyOCEL",
-        PM4PyOCEL(
+    return pm4py.objects.ocel.obj.OCEL(
             events=_query_dataframe(
                 ocel,
                 """
@@ -73,14 +70,14 @@ def to_pm4py(ocel: OCEL) -> "PM4PyOCEL":
             ),
             relations=_query_dataframe(
                 ocel,
-                f"""
+                """
             SELECT
                 e."ocel_id" AS "ocel:eid",
                 e."ocel_type" AS "ocel:activity",
                 e."ocel_time" AS "ocel:timestamp",
                 o."ocel_id" AS "ocel:oid",
                 o."ocel_type" AS "ocel:type",
-                {_qualifier_sql(ocel, table_name="event_object", alias="eo")}
+                eo."ocel_qualifier" AS "ocel:qualifier"
             FROM "event_object" eo
             JOIN "event" e
               ON eo."ocel_event_id" = e."ocel_id"
@@ -92,11 +89,11 @@ def to_pm4py(ocel: OCEL) -> "PM4PyOCEL":
             ),
             o2o=_query_dataframe(
                 ocel,
-                f"""
+                """
             SELECT
                 oo."ocel_source_id" AS "ocel:oid",
                 oo."ocel_target_id" AS "ocel:oid_2",
-                {_qualifier_sql(ocel, table_name="object_object", alias="oo")}
+                oo."ocel_qualifier" AS "ocel:qualifier"
             FROM "object_object" oo
             ORDER BY oo."ocel_source_id", oo."ocel_target_id"
             """,
@@ -134,7 +131,6 @@ def to_pm4py(ocel: OCEL) -> "PM4PyOCEL":
                 "oceldb:source": ocel.manifest.source,
                 "oceldb:storage_version": ocel.manifest.storage_version,
             },
-        ),
     )
 
 
@@ -146,20 +142,3 @@ def _query_dataframe(
 ) -> Any:
     relation = ocel.sql(sql)
     return pandas_module.DataFrame(relation.fetchall(), columns=relation.columns)
-
-
-def _qualifier_sql(
-    ocel: OCEL,
-    *,
-    table_name: str,
-    alias: str,
-) -> str:
-    columns = _table_columns(ocel, table_name)
-    if "ocel_qualifier" in columns:
-        return f'{alias}."ocel_qualifier" AS "ocel:qualifier"'
-    return 'CAST(NULL AS VARCHAR) AS "ocel:qualifier"'
-
-
-def _table_columns(ocel: OCEL, table_name: str) -> set[str]:
-    rows = ocel.sql(f'DESCRIBE "{table_name}"').fetchall()
-    return {str(row[0]) for row in rows}

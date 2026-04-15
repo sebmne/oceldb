@@ -131,8 +131,10 @@ class OCEL:
                 - `object.parquet`: object identities with one row per object
                 - `object_change.parquet`: temporal object history rows with
                   object state attributes
-                - `event_object.parquet`: event-to-object relations
-                - `object_object.parquet`: object-to-object relations
+                - `event_object.parquet`: event-to-object relations with
+                  `ocel_event_id`, `ocel_object_id`, and `ocel_qualifier`
+                - `object_object.parquet`: object-to-object relations with
+                  `ocel_source_id`, `ocel_target_id`, and `ocel_qualifier`
 
         Returns:
             An open `OCEL` handle.
@@ -168,9 +170,9 @@ class OCEL:
           Custom object attributes are stored here as typed columns and may be
           null on rows where the attribute was not updated.
         - `event_object` contains event-to-object incidence edges with
-          `ocel_event_id` and `ocel_object_id`.
+          `ocel_event_id`, `ocel_object_id`, and `ocel_qualifier`.
         - `object_object` contains object-to-object relation edges with
-          `ocel_source_id` and `ocel_target_id`.
+          `ocel_source_id`, `ocel_target_id`, and `ocel_qualifier`.
 
         Manifest interpretation:
 

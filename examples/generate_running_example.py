@@ -301,10 +301,10 @@ class StrictOCELBuilder:
             con.execute("CREATE TABLE event (ocel_id TEXT, ocel_type TEXT)")
             con.execute("CREATE TABLE object (ocel_id TEXT, ocel_type TEXT)")
             con.execute(
-                "CREATE TABLE event_object (ocel_event_id TEXT, ocel_object_id TEXT)"
+                "CREATE TABLE event_object (ocel_event_id TEXT, ocel_object_id TEXT, ocel_qualifier TEXT)"
             )
             con.execute(
-                "CREATE TABLE object_object (ocel_source_id TEXT, ocel_target_id TEXT)"
+                "CREATE TABLE object_object (ocel_source_id TEXT, ocel_target_id TEXT, ocel_qualifier TEXT)"
             )
 
             event_map_rows = [
@@ -352,11 +352,11 @@ class StrictOCELBuilder:
                 [(record.object_id, record.object_type) for record in self.objects],
             )
             con.executemany(
-                "INSERT INTO event_object VALUES (?, ?)",
+                "INSERT INTO event_object (ocel_event_id, ocel_object_id) VALUES (?, ?)",
                 self.event_object_rows,
             )
             con.executemany(
-                "INSERT INTO object_object VALUES (?, ?)",
+                "INSERT INTO object_object (ocel_source_id, ocel_target_id) VALUES (?, ?)",
                 sorted(self.object_object_rows),
             )
 

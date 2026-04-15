@@ -83,6 +83,7 @@ def _convert_to_directory(source_path: Path, target_dir: Path) -> None:
                 event_types=event_types,
                 object_types=object_types,
             )
+            _validate_relation_source_columns(source_schema)
 
             if not _attach_sqlite_source(con, source_path):
                 _stage_source_tables(sqlite_con, con, source_schema)
@@ -369,6 +370,18 @@ def _required_source_tables(
         *[f"event_{type_map}" for _, type_map in event_types],
         *[f"object_{type_map}" for _, type_map in object_types],
     ]
+
+
+def _validate_relation_source_columns(
+    source_schema: dict[str, dict[str, str]],
+) -> None:
+    for table_name in ("event_object", "object_object"):
+        missing = set(CORE_COLUMNS[table_name]) - set(source_schema[table_name])
+        if missing:
+            raise ValueError(
+                f"SQLite source table {table_name!r} is missing required columns: "
+                f"{', '.join(sorted(missing))}"
+            )
 
 
 def _attach_sqlite_source(

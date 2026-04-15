@@ -39,10 +39,12 @@ CORE_COLUMNS: dict[LogicalTableName, dict[str, str]] = {
     "event_object": {
         "ocel_event_id": "VARCHAR",
         "ocel_object_id": "VARCHAR",
+        "ocel_qualifier": "VARCHAR",
     },
     "object_object": {
         "ocel_source_id": "VARCHAR",
         "ocel_target_id": "VARCHAR",
+        "ocel_qualifier": "VARCHAR",
     },
 }
 

@@ -42,13 +42,15 @@ def _create_sqlite_source(source: str) -> None:
         con.execute("""
             CREATE TABLE event_object (
                 ocel_event_id TEXT,
-                ocel_object_id TEXT
+                ocel_object_id TEXT,
+                ocel_qualifier TEXT
             )
         """)
         con.execute("""
             CREATE TABLE object_object (
                 ocel_source_id TEXT,
-                ocel_target_id TEXT
+                ocel_target_id TEXT,
+                ocel_qualifier TEXT
             )
         """)
         con.execute("""
@@ -129,11 +131,11 @@ def _create_sqlite_source(source: str) -> None:
             [("o3", "2022-01-01 09:00:00", None, "Alice")],
         )
         con.executemany(
-            "INSERT INTO event_object VALUES (?, ?)",
+            "INSERT INTO event_object (ocel_event_id, ocel_object_id) VALUES (?, ?)",
             [("e1", "o1"), ("e1", "o3"), ("e2", "o2"), ("e3", "o1")],
         )
         con.executemany(
-            "INSERT INTO object_object VALUES (?, ?)",
+            "INSERT INTO object_object (ocel_source_id, ocel_target_id) VALUES (?, ?)",
             [("o1", "o3"), ("o2", "o3")],
         )
 
