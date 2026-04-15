@@ -5,9 +5,14 @@ description = "DuckDB-backed OCEL 2.0 storage and lazy query DSL"
 authors = [{name = "Sebastian Menne", email = "sebastian.menne@rwth-aachen.de"}]
 license = {text = "MIT"}
 readme = "README.md"
-requires-python = ">=3.13"
+requires-python = ">=3.12"
 dependencies = [
     "duckdb>=1.5.1",
+]
+
+[project.optional-dependencies]
+pm4py = [
+    "pm4py>=2.7.16",
 ]
 
 [dependency-groups]
@@ -53,6 +58,7 @@ testpaths = ["tests"]
 include = ["src"]
 exclude = ["tests"]
 extraPaths = ["src"]
-pythonVersion = "3.13"
+stubPath = "typings"
+pythonVersion = "3.12"
 typeCheckingMode = "strict"
 reportMissingTypeStubs = false

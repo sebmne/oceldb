@@ -28,7 +28,13 @@ or with [uv](https://docs.astral.sh/uv/):
 uv add oceldb
 ```
 
-Requires Python 3.13+.
+Requires Python 3.12+.
+
+Optional PM4Py interoperability:
+
+```bash
+pip install "oceldb[pm4py]"
+```
 
 ## Quick start
 
@@ -120,6 +126,24 @@ result = (
 
 **Terminal methods:** `collect`, `count`, `exists`, `scalar`, `to_sql`, `ids`,
 `to_ocel`, `write`
+
+
+## Optional PM4Py bridge
+
+If you want to hand an `oceldb` dataset to PM4Py, use the optional interop
+module:
+
+```python
+from oceldb import OCEL
+from oceldb.interop import to_pm4py
+
+with OCEL.read("running-example") as ocel:
+    pm4py_ocel = to_pm4py(ocel)
+```
+
+This keeps PM4Py out of the core dependency set while still allowing
+interoperability when you need it.
+
 
 ### Column references
 
