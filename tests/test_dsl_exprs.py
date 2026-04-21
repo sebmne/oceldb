@@ -2,20 +2,7 @@ from __future__ import annotations
 
 import pytest
 
-from oceldb.ast.aggregation import CountAgg
-from oceldb.ast.base import (
-    AliasExpr,
-    BinaryOpExpr,
-    CaseExpr,
-    CastExpr,
-    FunctionExpr,
-    LiteralExpr,
-    PredicateFunctionExpr,
-    SortExpr,
-    WindowFunctionExpr,
-)
-from oceldb.ast.field import ColumnExpr
-from oceldb.ast.relation import RelationAllExpr, RelationCountExpr, RelationExistsExpr
+from oceldb.compile.expr import render_compare_value, render_expr, render_order_expr
 from oceldb.dsl import (
     abs_,
     coalesce,
@@ -31,7 +18,22 @@ from oceldb.dsl import (
     round_,
     when,
 )
-from oceldb.sql.render_expr import render_compare_value, render_expr, render_order_expr
+from oceldb.expr.nodes import (
+    AliasExpr,
+    BinaryOpExpr,
+    CaseExpr,
+    CastExpr,
+    ColumnExpr,
+    CountAgg,
+    FunctionExpr,
+    LiteralExpr,
+    PredicateFunctionExpr,
+    RelationAllExpr,
+    RelationCountExpr,
+    RelationExistsExpr,
+    SortExpr,
+    WindowFunctionExpr,
+)
 
 
 def test_col_builder():

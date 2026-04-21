@@ -13,7 +13,7 @@ import duckdb
 from oceldb.core.manifest import LogicalTableName, OCELManifest, QuerySourceKind
 
 if TYPE_CHECKING:
-    from oceldb.query.root import OCELQueryRoot
+    from oceldb.api.sublog import Sublog
 
 
 class OCEL:
@@ -105,15 +105,18 @@ class OCEL:
         return self._manifest
 
     @cached_property
-    def query(self) -> OCELQueryRoot:
+    def query(self) -> Sublog:
         """
-        Return the root object for the lazy oceldb query DSL.
+        Return the identity sublog for the lazy oceldb query DSL.
 
-        The returned query root is cached per handle.
+        The returned sublog is cached per handle. It is the log-level entry
+        point: call ``.sublog(...)`` to narrow by event/object types, or pick
+        a grain (``.events()``, ``.flatten(...)``, ``.object_states()``, ...)
+        to move into the row-level query layer.
         """
-        from oceldb.query.root import OCELQueryRoot
+        from oceldb.api.sublog import Sublog
 
-        return OCELQueryRoot(self)
+        return Sublog(self)
 
     @staticmethod
     def read(path: str | Path) -> "OCEL":

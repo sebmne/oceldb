@@ -7,7 +7,7 @@ import duckdb
 import pytest
 from oceldb.core.manifest import OCELManifest, TableSchema
 from oceldb.core.ocel import OCEL
-from oceldb.sql.context import CompileContext
+from oceldb.compile.context import CompileContext
 
 EVENT_OBJECT_CORE_COLUMNS = {
     "ocel_event_id": "VARCHAR",

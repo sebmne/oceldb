@@ -94,7 +94,7 @@ grain:
 | `object_states(...).latest()` | Latest reconstructed state per object | Current attribute snapshots |
 | `object_states(...).as_of(t)` | State at timestamp *t* | Point-in-time analysis |
 | `object_changes(...)` | One row per raw attribute update | Change history |
-| `event_occurrences(...)` | One row per event-object incidence | Sequence and process analysis |
+| `flatten(...)` | One row per event-object incidence | Sequence and process analysis |
 | `event_objects()` | Raw event-to-object relations | Low-level joins |
 | `object_objects()` | Raw object-to-object relations | Low-level joins |
 
@@ -182,14 +182,14 @@ ocel.query.objects("order").where(linked("package").exists())
 
 ### Sequence analysis
 
-`event_occurrences(...)` combined with window functions enables process analysis:
+`flatten(...)` combined with window functions enables process analysis:
 
 ```python
 from oceldb import col, row_number
 
 timeline = (
     ocel.query
-    .event_occurrences("order")
+    .flatten("order")
     .with_columns(
         seq=row_number().over(
             partition_by="ocel_object_id",

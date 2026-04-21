@@ -1,5 +1,10 @@
-from oceldb.core.manifest import OCELManifest, TableSchema
-from oceldb.core.ocel import OCEL
+"""Public DSL surface — re-exports the user-facing expression builders.
+
+The actual IR lives in ``oceldb.expr``; this module is the stable public
+name users import from (``import oceldb.dsl as dsl``). Keeping the surface
+here means ``oceldb.expr`` can evolve as an implementation detail.
+"""
+
 from oceldb.expr import (
     abs_,
     asc,
@@ -23,14 +28,11 @@ from oceldb.expr import (
 )
 
 __all__ = [
-    "OCEL",
-    "OCELManifest",
-    "TableSchema",
     "abs_",
     "asc",
     "avg",
-    "col",
     "coalesce",
+    "col",
     "cooccurs_with",
     "count",
     "count_distinct",
@@ -41,8 +43,8 @@ __all__ = [
     "lit",
     "max_",
     "min_",
-    "row_number",
     "round_",
+    "row_number",
     "sum_",
     "when",
 ]

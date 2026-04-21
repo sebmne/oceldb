@@ -1,3 +1,10 @@
+"""Materialize a row-preserving query into a new OCEL directory.
+
+``materialize_query`` compiles the query, runs it against the source dataset
+to find the identities to keep, then projects the canonical tables down to
+those identities and writes them as a new OCEL directory.
+"""
+
 from __future__ import annotations
 
 from datetime import datetime, timezone
@@ -7,6 +14,8 @@ from uuid import uuid4
 
 import duckdb
 
+from oceldb.compile.plan import compile_query
+from oceldb.compile.schema import query_output_columns
 from oceldb.core.ocel import (
     OCEL,
     logical_table_sql,
@@ -19,19 +28,27 @@ from oceldb.io._manifest import (
     write_manifest,
 )
 from oceldb.io.read import open_ocel_directory
-from oceldb.query.compiler import compile_query, query_output_columns
-from oceldb.query.plan import GroupPlan, ProjectPlan, QueryPlan, contains_node, root_source, source_kind
+from oceldb.plan.nodes import (
+    GroupPlan,
+    PlanNode,
+    ProjectPlan,
+    contains_node,
+    root_source,
+)
+from oceldb.plan.sources import EventSource, ObjectSource, ObjectStateSource
 
 
-def materialize_query(query: QueryPlan) -> OCEL:
-    _validate_materialized_query(query)
+def materialize_query(ocel: OCEL, node: PlanNode) -> OCEL:
+    _validate_materialized_query(ocel, node)
 
     tempdir = TemporaryDirectory(prefix="oceldb_materialized_")
     target_dir = Path(tempdir.name) / "dataset"
     created_at = datetime.now(timezone.utc)
 
     try:
-        _write_materialized_directory(query, target_dir, created_at=created_at)
+        _write_materialized_directory(
+            ocel, node, target_dir, created_at=created_at
+        )
         return open_ocel_directory(
             target_dir,
             source_path=target_dir,
@@ -42,45 +59,57 @@ def materialize_query(query: QueryPlan) -> OCEL:
         raise
 
 
-def _validate_materialized_query(query: QueryPlan) -> None:
-    if source_kind(root_source(query.node)) not in {"event", "object", "object_state"}:
+def _validate_materialized_query(ocel: OCEL, node: PlanNode) -> None:
+    source = root_source(node)
+    if not isinstance(source, (EventSource, ObjectSource, ObjectStateSource)):
         raise ValueError(
-            "Only event-, object-, and object_state-rooted queries can be materialized to OCELs"
+            "Only event-, object-, and object_state-rooted queries can be "
+            "materialized to OCELs"
         )
 
-    if contains_node(query.node, (ProjectPlan, GroupPlan)):
+    if contains_node(node, (ProjectPlan, GroupPlan)):
         raise ValueError(
             "to_ocel() is only valid for row-preserving queries; "
             "select(...) and group_by(...).agg(...) are not allowed"
         )
 
-    output_columns = query_output_columns(query)
+    output_columns = query_output_columns(node, ocel.manifest)
     if "ocel_id" not in output_columns:
         raise ValueError("to_ocel() requires the query result to contain 'ocel_id'")
 
 
 def _write_materialized_directory(
-    query: QueryPlan,
+    ocel: OCEL,
+    node: PlanNode,
     target_dir: Path,
     *,
     created_at: datetime,
 ) -> None:
     target_dir.mkdir(parents=True, exist_ok=False)
     scratch_schema = f"materialize_{uuid4().hex[:8]}"
-    con = ocel_connection(query.ocel)
+    con = ocel_connection(ocel)
+    sql = compile_query(node, ocel.manifest)
+    source = root_source(node)
 
     try:
         con.execute(f'CREATE SCHEMA "{scratch_schema}"')
-        _create_materialized_views(query, scratch_schema)
+        if isinstance(source, EventSource):
+            _create_event_rooted_views(con, sql, scratch_schema)
+        elif isinstance(source, (ObjectSource, ObjectStateSource)):
+            _create_object_rooted_views(con, sql, scratch_schema)
+        else:
+            raise TypeError(f"Unsupported root source: {type(source).__name__}")
+
+        _publish_materialized_views(con, scratch_schema)
 
         manifest = build_manifest_from_tables(
             con,
-            oceldb_version=query.ocel.manifest.oceldb_version,
-            source=str(query.ocel.path),
+            oceldb_version=ocel.manifest.oceldb_version,
+            source=str(ocel.path),
             created_at=created_at,
             schema=scratch_schema,
             drop_empty_custom_columns=True,
-            source_manifest=query.ocel.manifest,
+            source_manifest=ocel.manifest,
         )
 
         for table_name in LOGICAL_TABLES:
@@ -103,29 +132,15 @@ def _write_materialized_directory(
         con.execute(f'DROP SCHEMA IF EXISTS "{scratch_schema}" CASCADE')
 
 
-def _create_materialized_views(query: QueryPlan, scratch_schema: str) -> None:
-    root_kind = source_kind(root_source(query.node))
-
-    if root_kind == "event":
-        _create_event_rooted_views(query, scratch_schema)
-        _publish_materialized_views(ocel_connection(query.ocel), scratch_schema)
-        return
-
-    if root_kind in {"object", "object_state"}:
-        _create_object_rooted_views(query, scratch_schema)
-        _publish_materialized_views(ocel_connection(query.ocel), scratch_schema)
-        return
-
-    raise TypeError(f"Unsupported root kind: {root_kind!r}")
-
-
-def _create_event_rooted_views(query: QueryPlan, scratch_schema: str) -> None:
-    con = ocel_connection(query.ocel)
-
+def _create_event_rooted_views(
+    con: duckdb.DuckDBPyConnection,
+    sql: str,
+    scratch_schema: str,
+) -> None:
     con.execute(f"""
         CREATE TABLE "{scratch_schema}"."_root" AS
         SELECT DISTINCT ocel_id
-        FROM ({compile_query(query)}) q
+        FROM ({sql}) q
     """)
 
     con.execute(f"""
@@ -150,16 +165,18 @@ def _create_event_rooted_views(query: QueryPlan, scratch_schema: str) -> None:
         FROM "{scratch_schema}"."_event_object" eo
     """)
 
-    _create_shared_object_tables(query, scratch_schema, con)
+    _create_shared_object_tables(con, scratch_schema)
 
 
-def _create_object_rooted_views(query: QueryPlan, scratch_schema: str) -> None:
-    con = ocel_connection(query.ocel)
-
+def _create_object_rooted_views(
+    con: duckdb.DuckDBPyConnection,
+    sql: str,
+    scratch_schema: str,
+) -> None:
     con.execute(f"""
         CREATE TABLE "{scratch_schema}"."_root" AS
         SELECT DISTINCT ocel_id
-        FROM ({compile_query(query)}) q
+        FROM ({sql}) q
     """)
 
     con.execute(f"""
@@ -189,13 +206,12 @@ def _create_object_rooted_views(query: QueryPlan, scratch_schema: str) -> None:
         FROM "{scratch_schema}"."_event_object" eo
     """)
 
-    _create_shared_object_tables(query, scratch_schema, con)
+    _create_shared_object_tables(con, scratch_schema)
 
 
 def _create_shared_object_tables(
-    query: QueryPlan,
-    scratch_schema: str,
     con: duckdb.DuckDBPyConnection,
+    scratch_schema: str,
 ) -> None:
     con.execute(f"""
         CREATE TABLE "{scratch_schema}"."_object" AS
@@ -245,10 +261,15 @@ def _copy_schema_table(
     columns: tuple[str, ...],
 ) -> None:
     escaped_target = str(target_file).replace("'", "''")
-    select_list = ", ".join(f'"{name.replace(chr(34), chr(34) * 2)}"' for name in columns)
+    select_list = ", ".join(
+        f'"{name.replace(chr(34), chr(34) * 2)}"' for name in columns
+    )
     con.execute(f"""
         COPY (
             SELECT {select_list}
             FROM "{schema}"."{table_name}"
         ) TO '{escaped_target}' (FORMAT PARQUET)
     """)
+
+
+__all__ = ["materialize_query"]

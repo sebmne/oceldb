@@ -26,10 +26,10 @@ def test_event_root_count(ocel):
     assert ocel.query.events().count() == 5
 
 
-def test_event_occurrences_root_exposes_object_timeline_rows(ocel):
+def test_flatten_root_exposes_object_timeline_rows(ocel):
     rows = (
         ocel.query
-        .event_occurrences("order")
+        .flatten("order")
         .sort("ocel_object_id", "ocel_event_time", "ocel_event_id")
         .select(
             "ocel_object_id",
@@ -98,10 +98,10 @@ def test_expression_functions_and_operators_in_queries(ocel_with_object_lifecycl
     ]
 
 
-def test_window_functions_on_event_occurrences(ocel):
+def test_window_functions_on_flatten(ocel):
     rows = (
         ocel.query
-        .event_occurrences("order")
+        .flatten("order")
         .with_columns(
             position=row_number().over(
                 partition_by="ocel_object_id",
@@ -198,7 +198,7 @@ def test_where_rejects_window_expressions_directly(ocel):
     with pytest.raises(TypeError, match="window expressions directly"):
         (
             ocel.query
-            .event_occurrences("order")
+            .flatten("order")
             .where(
                 col("ocel_event_type")
                 .lead()
@@ -215,7 +215,7 @@ def test_group_by_rejects_window_expressions(ocel):
     with pytest.raises(TypeError, match="does not accept window expressions"):
         (
             ocel.query
-            .event_occurrences("order")
+            .flatten("order")
             .group_by(
                 row_number().over(
                     partition_by="ocel_object_id",

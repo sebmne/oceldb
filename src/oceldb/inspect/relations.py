@@ -4,7 +4,7 @@ from dataclasses import dataclass
 from typing import Optional, cast
 
 from oceldb.core.ocel import OCEL
-from oceldb.dsl import count
+from oceldb.expr import count
 
 
 @dataclass(frozen=True)

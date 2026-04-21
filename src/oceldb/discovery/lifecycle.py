@@ -8,7 +8,7 @@ from typing import Mapping, cast
 
 from oceldb.core.ocel import OCEL
 from oceldb.inspect import object_attributes, object_types
-from oceldb.sql.object_history import render_object_change_batches_source
+from oceldb.compile.sources import render_object_change_batches_source
 
 
 @dataclass(frozen=True)

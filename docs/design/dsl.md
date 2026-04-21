@@ -64,7 +64,7 @@ It should expose exactly these roots:
 - `ocel.query.objects(*object_types: str) -> ObjectRows`
 - `ocel.query.object_changes(*object_types: str) -> ObjectChangeRows`
 - `ocel.query.object_states(*object_types: str) -> ObjectStateSeed`
-- `ocel.query.event_occurrences(*object_types: str) -> EventOccurrenceRows`
+- `ocel.query.flatten(*object_types: str) -> FlatEventRows`
 - `ocel.query.event_objects() -> EventObjectRows`
 - `ocel.query.object_objects() -> ObjectObjectRows`
 
@@ -84,7 +84,7 @@ The target public query types are:
 - `ObjectChangeRows`
 - `ObjectStateSeed`
 - `ObjectStateRows`
-- `EventOccurrenceRows`
+- `FlatEventRows`
 - `EventObjectRows`
 - `ObjectObjectRows`
 - `SelectedRows`
@@ -179,7 +179,7 @@ Objects without any history row must still appear in `ObjectStateRows`, with
 
 ### Event Occurrence Queries
 
-`event_occurrences(...)` returns one row per event-object incidence for the
+`flatten(...)` returns one row per event-object incidence for the
 selected object types.
 
 Each row contains:
@@ -249,7 +249,7 @@ ocel.query.events("Ship Order").where(
 
 ### Row Queries
 
-`EventRows`, `ObjectRows`, `ObjectChangeRows`, `ObjectStateRows`, `EventOccurrenceRows`
+`EventRows`, `ObjectRows`, `ObjectChangeRows`, `ObjectStateRows`, `FlatEventRows`
 
 - `where(*predicates: BoolExpr) -> Self`
 - `with_columns(*exprs, **named_exprs) -> Self`
@@ -281,7 +281,7 @@ This applies to:
 It does not apply to:
 
 - `ObjectChangeRows`
-- `EventOccurrenceRows`
+- `FlatEventRows`
 - `SelectedRows`
 - `AggregatedRows`
 - raw relation queries

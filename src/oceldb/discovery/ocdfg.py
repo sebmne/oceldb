@@ -6,10 +6,10 @@ from datetime import datetime
 from statistics import mean, median
 from typing import cast
 
+from oceldb.api.states import FlatEventRows
 from oceldb.core.ocel import OCEL
-from oceldb.dsl import col, count, desc, sum_, when
+from oceldb.expr import col, count, desc, sum_, when
 from oceldb.inspect.types import object_types as all_object_types
-from oceldb.query.types import EventOccurrenceRows
 
 
 @dataclass(frozen=True)
@@ -90,11 +90,11 @@ def _normalize_object_types(values: tuple[str, ...]) -> tuple[str, ...]:
     return tuple(normalized)
 
 
-def _timeline_query(ocel: OCEL, selected_types: tuple[str, ...]) -> EventOccurrenceRows:
+def _timeline_query(ocel: OCEL, selected_types: tuple[str, ...]) -> FlatEventRows:
     order_by = ("ocel_event_time", "ocel_event_id")
     return (
         ocel.query
-        .event_occurrences(*selected_types)
+        .flatten(*selected_types)
         .with_columns(
             previous_event_type=col("ocel_event_type").lag().over(
                 partition_by="ocel_object_id",
@@ -112,7 +112,7 @@ def _timeline_query(ocel: OCEL, selected_types: tuple[str, ...]) -> EventOccurre
     )
 
 
-def _load_nodes(timeline: EventOccurrenceRows) -> tuple[OCDFGNode, ...]:
+def _load_nodes(timeline: FlatEventRows) -> tuple[OCDFGNode, ...]:
     rows = cast(
         list[NodeRow],
         timeline
@@ -146,7 +146,7 @@ def _load_nodes(timeline: EventOccurrenceRows) -> tuple[OCDFGNode, ...]:
     )
 
 
-def _load_edges(timeline: EventOccurrenceRows) -> tuple[OCDFGEdge, ...]:
+def _load_edges(timeline: FlatEventRows) -> tuple[OCDFGEdge, ...]:
     rows = cast(
         list[EdgeRow],
         timeline

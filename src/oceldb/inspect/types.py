@@ -3,7 +3,7 @@ from __future__ import annotations
 from typing import Dict, List
 
 from oceldb.core.ocel import OCEL
-from oceldb.dsl import asc, col, count, desc
+from oceldb.expr import asc, col, count, desc
 
 
 def event_types(ocel: OCEL) -> List[str]:

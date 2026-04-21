@@ -25,7 +25,7 @@ def main() -> None:
 
         timeline = (
             ocel.query
-            .event_occurrences("order")
+            .flatten("order")
             .with_columns(
                 seq=row_number().over(
                     partition_by="ocel_object_id",
