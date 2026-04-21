@@ -69,6 +69,17 @@ def _render_object_state_root(
         as_of=as_of,
         object_types=source.selected_types,
     )
+    if source.sublog is not None and source.sublog.event_types is not None:
+        types_sql = ", ".join(
+            _render_literal(t) for t in sorted(source.sublog.event_types)
+        )
+        inner = (
+            f"SELECT * FROM ({inner}) _sub "
+            f'WHERE EXISTS (SELECT 1 FROM "event_object" eo '
+            f'JOIN "event" e ON e."ocel_id" = eo."ocel_event_id" '
+            f'WHERE eo."ocel_object_id" = _sub."ocel_id" '
+            f"AND e.\"ocel_type\" IN ({types_sql}))"
+        )
     return f"({inner}) AS {alias}"
 
 

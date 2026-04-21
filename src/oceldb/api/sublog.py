@@ -36,6 +36,7 @@ from oceldb.plan.sources import (
     ObjectObjectSource,
     ObjectSource,
     ObjectStateSource,
+    SublogFilter,
 )
 
 if TYPE_CHECKING:
@@ -104,7 +105,7 @@ class Sublog:
         types = _resolve_types(self.event_types, event_types, label="event")
         return EventRows(
             self.ocel,
-            SourcePlan(EventSource(selected_types=types)),
+            SourcePlan(EventSource(selected_types=types, sublog=self._filter())),
         )
 
     def objects(self, *object_types: str) -> ObjectRows:
@@ -112,7 +113,7 @@ class Sublog:
         types = _resolve_types(self.object_types, object_types, label="object")
         return ObjectRows(
             self.ocel,
-            SourcePlan(ObjectSource(selected_types=types)),
+            SourcePlan(ObjectSource(selected_types=types, sublog=self._filter())),
         )
 
     def object_states(self, *object_types: str) -> ObjectStateSeed:
@@ -123,7 +124,9 @@ class Sublog:
         types = _resolve_types(self.object_types, object_types, label="object")
         return ObjectStateSeed(
             self.ocel,
-            SourcePlan(ObjectStateSource(selected_types=types)),
+            SourcePlan(
+                ObjectStateSource(selected_types=types, sublog=self._filter())
+            ),
         )
 
     def object_changes(self, *object_types: str) -> ObjectChangeRows:
@@ -131,7 +134,9 @@ class Sublog:
         types = _resolve_types(self.object_types, object_types, label="object")
         return ObjectChangeRows(
             self.ocel,
-            SourcePlan(ObjectChangeSource(selected_types=types)),
+            SourcePlan(
+                ObjectChangeSource(selected_types=types, sublog=self._filter())
+            ),
         )
 
     def flatten(self, *object_types: str) -> FlatEventRows:
@@ -139,16 +144,34 @@ class Sublog:
         types = _resolve_types(self.object_types, object_types, label="object")
         return FlatEventRows(
             self.ocel,
-            SourcePlan(EventOccurrenceSource(selected_types=types)),
+            SourcePlan(
+                EventOccurrenceSource(selected_types=types, sublog=self._filter())
+            ),
         )
 
     def event_objects(self) -> EventObjectRows:
         """Raw event-object incidence rows."""
-        return EventObjectRows(self.ocel, SourcePlan(EventObjectSource()))
+        return EventObjectRows(
+            self.ocel, SourcePlan(EventObjectSource(sublog=self._filter()))
+        )
 
     def object_objects(self) -> ObjectObjectRows:
         """Raw object-object link rows."""
-        return ObjectObjectRows(self.ocel, SourcePlan(ObjectObjectSource()))
+        return ObjectObjectRows(
+            self.ocel, SourcePlan(ObjectObjectSource(sublog=self._filter()))
+        )
+
+    # -- internal -----------------------------------------------------------
+
+    def _filter(self) -> SublogFilter | None:
+        """Return the SublogFilter to attach to a Source, or None for identity."""
+        if self._identity:
+            return None
+        return SublogFilter(
+            event_types=self.event_types,
+            object_types=self.object_types,
+            drop_orphan_events=self.drop_orphan_events,
+        )
 
     # -- catalog helpers -----------------------------------------------------
 
@@ -205,11 +228,19 @@ class Sublog:
     def to_ocel(self) -> "OCEL":
         """Materialize the sublog as a new OCEL dataset directory.
 
-        Stage 1 is a placeholder — full cross-cut materialization lands in
-        Stage 2 when filter propagation is wired end-to-end.
+        Always returns a fresh ``OCEL`` handle. An identity sublog still
+        materializes — it just copies the full dataset; callers who only want
+        a handle to the underlying OCEL should use ``self.ocel`` instead.
         """
-        raise NotImplementedError(
-            "Sublog.to_ocel() is implemented in Stage 2 of the new DSL view."
+        from oceldb.api.materialize import materialize_sublog
+
+        return materialize_sublog(
+            self.ocel,
+            SublogFilter(
+                event_types=self.event_types,
+                object_types=self.object_types,
+                drop_orphan_events=self.drop_orphan_events,
+            ),
         )
 
 

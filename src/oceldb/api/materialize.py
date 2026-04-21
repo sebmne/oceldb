@@ -35,7 +35,12 @@ from oceldb.plan.nodes import (
     contains_node,
     root_source,
 )
-from oceldb.plan.sources import EventSource, ObjectSource, ObjectStateSource
+from oceldb.plan.sources import (
+    EventSource,
+    ObjectSource,
+    ObjectStateSource,
+    SublogFilter,
+)
 
 
 def materialize_query(ocel: OCEL, node: PlanNode) -> OCEL:
@@ -272,4 +277,137 @@ def _copy_schema_table(
     """)
 
 
-__all__ = ["materialize_query"]
+# ---------------------------------------------------------------------------
+# Sublog materialization
+# ---------------------------------------------------------------------------
+
+
+def materialize_sublog(ocel: OCEL, sublog: SublogFilter) -> OCEL:
+    """Materialize a ``Sublog`` (type filters + drop_orphan_events) as an OCEL."""
+    tempdir = TemporaryDirectory(prefix="oceldb_materialized_")
+    target_dir = Path(tempdir.name) / "dataset"
+    created_at = datetime.now(timezone.utc)
+
+    try:
+        _write_sublog_directory(ocel, sublog, target_dir, created_at=created_at)
+        return open_ocel_directory(
+            target_dir,
+            source_path=target_dir,
+            tempdir=tempdir,
+        )
+    except Exception:
+        tempdir.cleanup()
+        raise
+
+
+def _write_sublog_directory(
+    ocel: OCEL,
+    sublog: SublogFilter,
+    target_dir: Path,
+    *,
+    created_at: datetime,
+) -> None:
+    target_dir.mkdir(parents=True, exist_ok=False)
+    scratch_schema = f"materialize_{uuid4().hex[:8]}"
+    con = ocel_connection(ocel)
+
+    try:
+        con.execute(f'CREATE SCHEMA "{scratch_schema}"')
+        _create_sublog_views(con, sublog, scratch_schema)
+        _publish_materialized_views(con, scratch_schema)
+
+        manifest = build_manifest_from_tables(
+            con,
+            oceldb_version=ocel.manifest.oceldb_version,
+            source=str(ocel.path),
+            created_at=created_at,
+            schema=scratch_schema,
+            drop_empty_custom_columns=True,
+            source_manifest=ocel.manifest,
+        )
+
+        for table_name in LOGICAL_TABLES:
+            _copy_schema_table(
+                con,
+                scratch_schema,
+                table_name,
+                target_dir / f"{table_name}.parquet",
+                columns=tuple(manifest.table(table_name).columns),
+            )
+
+        write_manifest(target_dir / MANIFEST_FILE, manifest)
+    except Exception:
+        if target_dir.exists():
+            for child in target_dir.iterdir():
+                child.unlink()
+            target_dir.rmdir()
+        raise
+    finally:
+        con.execute(f'DROP SCHEMA IF EXISTS "{scratch_schema}" CASCADE')
+
+
+def _create_sublog_views(
+    con: duckdb.DuckDBPyConnection,
+    sublog: SublogFilter,
+    scratch_schema: str,
+) -> None:
+    event_predicates: list[str] = []
+    if sublog.event_types is not None:
+        types_sql = ", ".join(_sql_literal(t) for t in sorted(sublog.event_types))
+        event_predicates.append(f'e."ocel_type" IN ({types_sql})')
+    if (
+        sublog.object_types is not None
+        and sublog.drop_orphan_events
+    ):
+        types_sql = ", ".join(_sql_literal(t) for t in sorted(sublog.object_types))
+        event_predicates.append(
+            f'EXISTS (SELECT 1 FROM {logical_table_sql("event_object")} eo '
+            f'JOIN {logical_table_sql("object")} o '
+            f'ON o."ocel_id" = eo."ocel_object_id" '
+            f'WHERE eo."ocel_event_id" = e."ocel_id" '
+            f'AND o."ocel_type" IN ({types_sql}))'
+        )
+    event_where = (
+        f"WHERE {' AND '.join(event_predicates)}" if event_predicates else ""
+    )
+
+    con.execute(f"""
+        CREATE TABLE "{scratch_schema}"."_event" AS
+        SELECT DISTINCT e.*
+        FROM {logical_table_sql("event")} e
+        {event_where}
+    """)
+
+    object_predicates = ['eo."ocel_event_id" IN '
+                         f'(SELECT "ocel_id" FROM "{scratch_schema}"."_event")']
+    if sublog.object_types is not None:
+        types_sql = ", ".join(_sql_literal(t) for t in sorted(sublog.object_types))
+        object_predicates.append(
+            f'eo."ocel_object_id" IN '
+            f'(SELECT "ocel_id" FROM {logical_table_sql("object")} '
+            f'WHERE "ocel_type" IN ({types_sql}))'
+        )
+    eo_where = "WHERE " + " AND ".join(object_predicates)
+
+    con.execute(f"""
+        CREATE TABLE "{scratch_schema}"."_event_object" AS
+        SELECT DISTINCT eo.*
+        FROM {logical_table_sql("event_object")} eo
+        {eo_where}
+    """)
+
+    con.execute(f"""
+        CREATE TABLE "{scratch_schema}"."_object_ids" AS
+        SELECT DISTINCT eo."ocel_object_id" AS "ocel_id"
+        FROM "{scratch_schema}"."_event_object" eo
+    """)
+
+    _create_shared_object_tables(con, scratch_schema)
+
+
+def _sql_literal(value: str) -> str:
+    escaped = value.replace("'", "''")
+    return f"'{escaped}'"
+
+
+__all__ = ["materialize_query", "materialize_sublog"]

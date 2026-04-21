@@ -4,6 +4,12 @@ A ``Source`` knows its scope, the OCEL types it filters to (if any), and how
 to render itself as SQL. Column availability is computed against an
 ``OCELManifest`` by a free function rather than stored on the source, so the
 plan IR never holds a live reference to the dataset.
+
+Each concrete source also carries an optional ``SublogFilter`` — the
+log-level type filters set at ``Sublog`` time. The native ``selected_types``
+of a source handles the "self-axis" filter (e.g. event types on
+``EventSource``); ``SublogFilter`` carries the cross-axis constraints
+(e.g. object types on ``EventSource``) and the ``drop_orphan_events`` rule.
 """
 
 from __future__ import annotations
@@ -14,6 +20,32 @@ from datetime import date, datetime
 
 from oceldb.core.manifest import OCELManifest, TableSchema
 from oceldb.plan.scope import ScopeKind
+
+# ---------------------------------------------------------------------------
+# Sublog filter
+# ---------------------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class SublogFilter:
+    """Log-level type filters that propagate into every source scan.
+
+    ``event_types`` / ``object_types``: the log is restricted to these
+    OCEL types. ``None`` means "all types".
+
+    ``drop_orphan_events``: when ``object_types`` is set, events that no
+    longer touch any surviving object are filtered out. Has no effect
+    when ``object_types`` is ``None``.
+    """
+
+    event_types: frozenset[str] | None = None
+    object_types: frozenset[str] | None = None
+    drop_orphan_events: bool = True
+
+    @property
+    def is_identity(self) -> bool:
+        return self.event_types is None and self.object_types is None
+
 
 # ---------------------------------------------------------------------------
 # Base
@@ -50,6 +82,7 @@ class Source(ABC):
 @dataclass(frozen=True)
 class EventSource(Source):
     selected_types: tuple[str, ...] = ()
+    sublog: SublogFilter | None = None
 
     def scope(self) -> ScopeKind:
         return "event"
@@ -59,15 +92,18 @@ class EventSource(Source):
         return self.selected_types
 
     def render(self, alias: str) -> str:
-        if not self.selected_types:
+        predicates = _event_type_predicates('"event"."ocel_type"', self.selected_types)
+        predicates.extend(_event_orphan_predicates('"event"."ocel_id"', self.sublog))
+        if not predicates:
             return f'"event" AS {alias}'
-        types_sql = ", ".join(_string_literal(t) for t in self.selected_types)
-        return f'(SELECT * FROM "event" WHERE "ocel_type" IN ({types_sql})) AS {alias}'
+        where = " AND ".join(predicates)
+        return f'(SELECT * FROM "event" WHERE {where}) AS {alias}'
 
 
 @dataclass(frozen=True)
 class ObjectSource(Source):
     selected_types: tuple[str, ...] = ()
+    sublog: SublogFilter | None = None
 
     def scope(self) -> ScopeKind:
         return "object"
@@ -77,15 +113,18 @@ class ObjectSource(Source):
         return self.selected_types
 
     def render(self, alias: str) -> str:
-        if not self.selected_types:
+        predicates = _event_type_predicates('"object"."ocel_type"', self.selected_types)
+        predicates.extend(_object_touches_event_predicates('"object"."ocel_id"', self.sublog))
+        if not predicates:
             return f'"object" AS {alias}'
-        types_sql = ", ".join(_string_literal(t) for t in self.selected_types)
-        return f'(SELECT * FROM "object" WHERE "ocel_type" IN ({types_sql})) AS {alias}'
+        where = " AND ".join(predicates)
+        return f'(SELECT * FROM "object" WHERE {where}) AS {alias}'
 
 
 @dataclass(frozen=True)
 class ObjectChangeSource(Source):
     selected_types: tuple[str, ...] = ()
+    sublog: SublogFilter | None = None
 
     def scope(self) -> ScopeKind:
         return "object_change"
@@ -95,31 +134,66 @@ class ObjectChangeSource(Source):
         return self.selected_types
 
     def render(self, alias: str) -> str:
-        if not self.selected_types:
+        predicates = _event_type_predicates(
+            '"object_change"."ocel_type"', self.selected_types
+        )
+        predicates.extend(
+            _object_touches_event_predicates('"object_change"."ocel_id"', self.sublog)
+        )
+        if not predicates:
             return f'"object_change" AS {alias}'
-        types_sql = ", ".join(_string_literal(t) for t in self.selected_types)
+        where = " AND ".join(predicates)
         return (
-            f'(SELECT * FROM "object_change" WHERE "ocel_type" IN ({types_sql})) '
-            f"AS {alias}"
+            f'(SELECT * FROM "object_change" WHERE {where}) AS {alias}'
         )
 
 
 @dataclass(frozen=True)
 class EventObjectSource(Source):
+    sublog: SublogFilter | None = None
+
     def scope(self) -> ScopeKind:
         return "event_object"
 
     def render(self, alias: str) -> str:
-        return f'"event_object" AS {alias}'
+        if self.sublog is None or self.sublog.is_identity:
+            return f'"event_object" AS {alias}'
+        predicates = _event_object_predicates(
+            event_ref='"event_object"."ocel_event_id"',
+            object_ref='"event_object"."ocel_object_id"',
+            sublog=self.sublog,
+        )
+        if not predicates:
+            return f'"event_object" AS {alias}'
+        where = " AND ".join(predicates)
+        return (
+            f'(SELECT * FROM "event_object" WHERE {where}) AS {alias}'
+        )
 
 
 @dataclass(frozen=True)
 class ObjectObjectSource(Source):
+    sublog: SublogFilter | None = None
+
     def scope(self) -> ScopeKind:
         return "object_object"
 
     def render(self, alias: str) -> str:
-        return f'"object_object" AS {alias}'
+        if self.sublog is None or self.sublog.object_types is None:
+            return f'"object_object" AS {alias}'
+        types = _type_literal_list(self.sublog.object_types)
+        source_in = (
+            f'"object_object"."ocel_source_id" IN '
+            f'(SELECT "ocel_id" FROM "object" WHERE "ocel_type" IN ({types}))'
+        )
+        target_in = (
+            f'"object_object"."ocel_target_id" IN '
+            f'(SELECT "ocel_id" FROM "object" WHERE "ocel_type" IN ({types}))'
+        )
+        return (
+            f'(SELECT * FROM "object_object" WHERE {source_in} AND {target_in}) '
+            f"AS {alias}"
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -131,7 +205,8 @@ class ObjectObjectSource(Source):
 class EventOccurrenceSource(Source):
     """Event-object incidence rows, one per (event, object) pair."""
 
-    selected_types: tuple[str, ...] = ()  # object types
+    selected_types: tuple[str, ...] = ()  # object types (native axis)
+    sublog: SublogFilter | None = None
 
     def scope(self) -> ScopeKind:
         return "event_occurrence"
@@ -146,10 +221,15 @@ class EventOccurrenceSource(Source):
             'JOIN "event" e ON e."ocel_id" = eo."ocel_event_id" '
             'JOIN "object" o ON o."ocel_id" = eo."ocel_object_id"'
         )
-        type_filter = ""
-        if self.selected_types:
-            types_sql = ", ".join(_string_literal(t) for t in self.selected_types)
-            type_filter = f'WHERE o."ocel_type" IN ({types_sql})'
+        predicates = _event_type_predicates('o."ocel_type"', self.selected_types)
+        if self.sublog is not None:
+            if self.sublog.event_types is not None:
+                values = _type_literal_list(self.sublog.event_types)
+                predicates.append(f'e."ocel_type" IN ({values})')
+            if self.sublog.object_types is not None:
+                values = _type_literal_list(self.sublog.object_types)
+                predicates.append(f'o."ocel_type" IN ({values})')
+        where_sql = ("WHERE " + " AND ".join(predicates)) if predicates else ""
         return (
             f"(SELECT "
             f'eo."ocel_event_id" AS "ocel_event_id", '
@@ -157,7 +237,7 @@ class EventOccurrenceSource(Source):
             f'e."ocel_time" AS "ocel_event_time", '
             f'eo."ocel_object_id" AS "ocel_object_id", '
             f'o."ocel_type" AS "ocel_object_type" '
-            f"FROM {from_sql} {type_filter}) AS {alias}"
+            f"FROM {from_sql} {where_sql}) AS {alias}"
         )
 
 
@@ -173,6 +253,7 @@ class ObjectStateSource(Source):
 
     selected_types: tuple[str, ...] = ()
     mode: tuple[str, date | datetime | None] | None = None
+    sublog: SublogFilter | None = None
 
     def scope(self) -> ScopeKind:
         return "object_state"
@@ -185,12 +266,14 @@ class ObjectStateSource(Source):
         return ObjectStateSource(
             selected_types=self.selected_types,
             mode=("latest", None),
+            sublog=self.sublog,
         )
 
     def with_mode_as_of(self, timestamp: date | datetime) -> "ObjectStateSource":
         return ObjectStateSource(
             selected_types=self.selected_types,
             mode=("as_of", timestamp),
+            sublog=self.sublog,
         )
 
     def render(self, alias: str) -> str:
@@ -252,6 +335,84 @@ def _custom_for_types(
     if not selected_types:
         return dict(schema.custom_columns)
     return schema.custom_columns_for_types(selected_types)
+
+
+# ---------------------------------------------------------------------------
+# Predicate helpers for cross-axis filtering
+# ---------------------------------------------------------------------------
+
+
+def _event_type_predicates(
+    type_ref: str,
+    selected_types: tuple[str, ...],
+) -> list[str]:
+    """Predicate list for a source's own native type axis (selected_types)."""
+    if not selected_types:
+        return []
+    values = _type_literal_list(selected_types)
+    return [f"{type_ref} IN ({values})"]
+
+
+def _event_orphan_predicates(
+    event_id_ref: str,
+    sublog: SublogFilter | None,
+) -> list[str]:
+    """Cross-axis object-types + drop_orphan_events filter on an event-shaped source."""
+    if (
+        sublog is None
+        or sublog.object_types is None
+        or not sublog.drop_orphan_events
+    ):
+        return []
+    types = _type_literal_list(sublog.object_types)
+    return [
+        f"EXISTS (SELECT 1 FROM \"event_object\" eo "
+        f'JOIN "object" o ON o."ocel_id" = eo."ocel_object_id" '
+        f'WHERE eo."ocel_event_id" = {event_id_ref} '
+        f"AND o.\"ocel_type\" IN ({types}))"
+    ]
+
+
+def _object_touches_event_predicates(
+    object_id_ref: str,
+    sublog: SublogFilter | None,
+) -> list[str]:
+    """Cross-axis event-types filter on an object-shaped source."""
+    if sublog is None or sublog.event_types is None:
+        return []
+    types = _type_literal_list(sublog.event_types)
+    return [
+        f"EXISTS (SELECT 1 FROM \"event_object\" eo "
+        f'JOIN "event" e ON e."ocel_id" = eo."ocel_event_id" '
+        f'WHERE eo."ocel_object_id" = {object_id_ref} '
+        f"AND e.\"ocel_type\" IN ({types}))"
+    ]
+
+
+def _event_object_predicates(
+    *,
+    event_ref: str,
+    object_ref: str,
+    sublog: SublogFilter,
+) -> list[str]:
+    predicates: list[str] = []
+    if sublog.event_types is not None:
+        types = _type_literal_list(sublog.event_types)
+        predicates.append(
+            f"{event_ref} IN "
+            f"(SELECT \"ocel_id\" FROM \"event\" WHERE \"ocel_type\" IN ({types}))"
+        )
+    if sublog.object_types is not None:
+        types = _type_literal_list(sublog.object_types)
+        predicates.append(
+            f"{object_ref} IN "
+            f"(SELECT \"ocel_id\" FROM \"object\" WHERE \"ocel_type\" IN ({types}))"
+        )
+    return predicates
+
+
+def _type_literal_list(types: tuple[str, ...] | frozenset[str]) -> str:
+    return ", ".join(_string_literal(t) for t in sorted(types))
 
 
 def _string_literal(value: str) -> str:
@@ -321,6 +482,7 @@ __all__ = [
     "ObjectSource",
     "ObjectStateSource",
     "Source",
+    "SublogFilter",
     "render_object_change_batches_source",
     "source_available_columns",
 ]
