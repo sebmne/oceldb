@@ -20,21 +20,17 @@ from typing import TYPE_CHECKING
 
 from oceldb.api.states import (
     EventObjectRows,
-    EventRows,
     FlatEventRows,
     ObjectChangeRows,
     ObjectObjectRows,
-    ObjectRows,
     ObjectStateSeed,
 )
 from oceldb.plan.nodes import SourcePlan
 from oceldb.plan.sources import (
     EventObjectSource,
     EventOccurrenceSource,
-    EventSource,
     ObjectChangeSource,
     ObjectObjectSource,
-    ObjectSource,
     ObjectStateSource,
     SublogFilter,
 )
@@ -100,23 +96,7 @@ class Sublog:
 
     # -- grain roots ---------------------------------------------------------
 
-    def events(self, *event_types: str) -> EventRows:
-        """Event-grained row query, optionally narrowed further."""
-        types = _resolve_types(self.event_types, event_types, label="event")
-        return EventRows(
-            self.ocel,
-            SourcePlan(EventSource(selected_types=types, sublog=self._filter())),
-        )
-
-    def objects(self, *object_types: str) -> ObjectRows:
-        """Object-identity-grained row query."""
-        types = _resolve_types(self.object_types, object_types, label="object")
-        return ObjectRows(
-            self.ocel,
-            SourcePlan(ObjectSource(selected_types=types, sublog=self._filter())),
-        )
-
-    def object_states(self, *object_types: str) -> ObjectStateSeed:
+    def states(self, *object_types: str) -> ObjectStateSeed:
         """Reconstructed object-state seed.
 
         Requires ``.latest()`` or ``.as_of(t)`` before any row operator.
@@ -129,8 +109,8 @@ class Sublog:
             ),
         )
 
-    def object_changes(self, *object_types: str) -> ObjectChangeRows:
-        """Raw object-history query."""
+    def changes(self, *object_types: str) -> ObjectChangeRows:
+        """Raw object-history rows (one row per attribute change)."""
         types = _resolve_types(self.object_types, object_types, label="object")
         return ObjectChangeRows(
             self.ocel,
@@ -149,14 +129,14 @@ class Sublog:
             ),
         )
 
-    def event_objects(self) -> EventObjectRows:
-        """Raw event-object incidence rows."""
+    def participations(self) -> EventObjectRows:
+        """Raw event-object incidence rows (one row per (event, object) link)."""
         return EventObjectRows(
             self.ocel, SourcePlan(EventObjectSource(sublog=self._filter()))
         )
 
-    def object_objects(self) -> ObjectObjectRows:
-        """Raw object-object link rows."""
+    def links(self) -> ObjectObjectRows:
+        """Raw object-object link rows (one row per directed (source, target))."""
         return ObjectObjectRows(
             self.ocel, SourcePlan(ObjectObjectSource(sublog=self._filter()))
         )
@@ -222,6 +202,26 @@ class Sublog:
             f'SELECT DISTINCT "ocel_type" FROM "object"{where} ORDER BY "ocel_type"'
         ).fetchall()
         return [row[0] for row in rows]
+
+    def event_type_counts(self) -> dict[str, int]:
+        """Mapping ``event_type -> count`` for events in the sublog."""
+        where = _event_type_where(self.event_types)
+        rows = self.ocel.sql(
+            f'SELECT "ocel_type", COUNT(*) FROM "event"{where} '
+            f'GROUP BY "ocel_type" '
+            f'ORDER BY COUNT(*) DESC, "ocel_type"'
+        ).fetchall()
+        return {row[0]: int(row[1]) for row in rows}
+
+    def object_type_counts(self) -> dict[str, int]:
+        """Mapping ``object_type -> count`` for objects in the sublog."""
+        where = _object_type_where(self.object_types)
+        rows = self.ocel.sql(
+            f'SELECT "ocel_type", COUNT(*) FROM "object"{where} '
+            f'GROUP BY "ocel_type" '
+            f'ORDER BY COUNT(*) DESC, "ocel_type"'
+        ).fetchall()
+        return {row[0]: int(row[1]) for row in rows}
 
     # -- materialization -----------------------------------------------------
 

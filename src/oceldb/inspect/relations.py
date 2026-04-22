@@ -34,7 +34,7 @@ class ObjectObjectStats:
 def event_object_stats(ocel: OCEL) -> EventObjectStats:
     per_event = (
         ocel.query
-        .event_objects()
+        .participations()
         .group_by("ocel_event_id")
         .agg(count().alias("object_count"))
         .collect()
@@ -42,7 +42,7 @@ def event_object_stats(ocel: OCEL) -> EventObjectStats:
 
     per_object = (
         ocel.query
-        .event_objects()
+        .participations()
         .group_by("ocel_object_id")
         .agg(count().alias("event_count"))
         .collect()

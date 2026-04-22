@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from oceldb import OCEL, col, count, row_number
+from oceldb import OCEL, col, row_number
 from oceldb.discovery import ocdfg
 
 
@@ -10,18 +10,10 @@ def main() -> None:
     dataset = Path(__file__).parent / "data" / "smoke-example"
 
     with OCEL.read(dataset) as ocel:
-        event_count = ocel.query.events().count()
-        object_count = ocel.query.objects().count()
+        event_count = ocel.query.event_count()
+        object_count = ocel.query.object_count()
 
-        event_type_counts = (
-            ocel.query
-            .events()
-            .group_by("ocel_type")
-            .agg(count().alias("n"))
-            .sort("ocel_type")
-            .collect()
-            .fetchall()
-        )
+        event_type_counts = sorted(ocel.query.event_type_counts().items())
 
         timeline = (
             ocel.query

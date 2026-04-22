@@ -111,7 +111,7 @@ class OCEL:
 
         The returned sublog is cached per handle. It is the log-level entry
         point: call ``.sublog(...)`` to narrow by event/object types, or pick
-        a grain (``.events()``, ``.flatten(...)``, ``.object_states()``, ...)
+        a grain (``.flatten(...)``, ``.states(...)``, ``.participations()``, ...)
         to move into the row-level query layer.
         """
         from oceldb.api.sublog import Sublog
@@ -192,7 +192,7 @@ class OCEL:
 
         - Query `object` when you need identities or object counts.
         - Query `object_change` when you need raw object history.
-        - Prefer the DSL entrypoint `ocel.query.object_states(...)` when you
+        - Prefer the DSL entrypoint `ocel.query.states(...)` when you
           need reconstructed object state such as the latest state or a state
           as of a timestamp.
 

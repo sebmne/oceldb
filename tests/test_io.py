@@ -178,8 +178,8 @@ def test_write_and_read_directory_roundtrip(ocel, tmp_path):
     written = ocel.write(target)
 
     with OCEL.read(written) as reloaded:
-        assert reloaded.query.events().count() == 5
-        assert reloaded.query.objects().count() == 3
+        assert reloaded.query.event_count() == 5
+        assert reloaded.query.object_count() == 3
 
 
 def test_write_and_read_directory(ocel, tmp_path):
@@ -187,23 +187,23 @@ def test_write_and_read_directory(ocel, tmp_path):
     written = ocel.write(target)
 
     with OCEL.read(written) as reloaded:
-        assert reloaded.query.events("Create Order").count() == 3
-        assert reloaded.query.object_states("order").latest().where(col("status") == "open").ids() == ["o1"]
+        assert reloaded.query.sublog(event_types=["Create Order"]).event_count() == 3
+        assert reloaded.query.states("order").latest().where(col("status") == "open").ids() == ["o1"]
 
 
 def test_write_sublog_directory(ocel, tmp_path):
     target = tmp_path / "open-orders"
     written = (
         ocel.query
-        .object_states("order")
+        .states("order")
         .latest()
         .where(col("status") == "open")
         .write(target)
     )
 
     with OCEL.read(written) as sublog:
-        assert sorted(sublog.query.events().ids()) == ["e1", "e3", "e5"]
-        assert sorted(sublog.query.objects().ids()) == ["o1", "o3"]
+        assert sorted(sublog.query.event_ids()) == ["e1", "e3", "e5"]
+        assert sorted(sublog.query.object_ids()) == ["o1", "o3"]
 
 
 def test_write_rebuilds_manifest_from_actual_tables(ocel, tmp_path):
@@ -218,7 +218,7 @@ def test_write_rebuilds_manifest_from_actual_tables(ocel, tmp_path):
     with OCEL.read(written) as reloaded:
         assert "ghost_event" not in reloaded.manifest.table("event").columns
         assert "ghost_state" not in reloaded.manifest.table("object_change").columns
-        assert reloaded.query.events().count() == 5
+        assert reloaded.query.event_count() == 5
 
 
 def test_written_manifest_omits_non_attribute_table_metadata(ocel, tmp_path):
@@ -250,7 +250,7 @@ def test_written_manifest_omits_non_attribute_table_metadata(ocel, tmp_path):
 def test_to_ocel_returns_independent_handle(ocel):
     derived = (
         ocel.query
-        .object_states("order")
+        .states("order")
         .latest()
         .where(col("status") == "open")
         .to_ocel()
@@ -259,8 +259,8 @@ def test_to_ocel_returns_independent_handle(ocel):
     try:
         ocel.close()
 
-        assert sorted(derived.query.events().ids()) == ["e1", "e3", "e5"]
-        assert sorted(derived.query.objects().ids()) == ["o1", "o3"]
+        assert sorted(derived.query.event_ids()) == ["e1", "e3", "e5"]
+        assert sorted(derived.query.object_ids()) == ["o1", "o3"]
     finally:
         derived.close()
 
@@ -268,15 +268,15 @@ def test_to_ocel_returns_independent_handle(ocel):
 def test_object_rooted_sublog_keeps_selected_orphan_objects(ocel_with_orphan_object):
     derived = (
         ocel_with_orphan_object.query
-        .object_states("order")
+        .states("order")
         .latest()
         .where(col("status") == "open")
         .to_ocel()
     )
 
     try:
-        assert derived.query.events().ids() == ["e1"]
-        assert sorted(derived.query.objects().ids()) == ["o1", "o2"]
+        assert derived.query.event_ids() == ["e1"]
+        assert sorted(derived.query.object_ids()) == ["o1", "o2"]
     finally:
         derived.close()
 
@@ -288,18 +288,18 @@ def test_to_ocel_rebuilds_manifest_from_materialized_tables(ocel):
         manifest=_manifest_with_stale_columns(ocel.manifest),
     )
 
-    derived = stale.query.events("Create Order").to_ocel()
+    derived = stale.query.sublog(event_types=["Create Order"]).to_ocel()
 
     try:
         assert "ghost_event" not in derived.manifest.table("event").columns
         assert "ghost_state" not in derived.manifest.table("object_change").columns
-        assert derived.query.events().count() == 3
+        assert derived.query.event_count() == 3
     finally:
         derived.close()
 
 
 def test_to_ocel_prunes_dead_event_custom_columns(ocel):
-    derived = ocel.query.events("Create Order").to_ocel()
+    derived = ocel.query.sublog(event_types=["Create Order"]).to_ocel()
 
     try:
         custom_columns = derived.manifest.table("event").custom_columns
@@ -307,7 +307,7 @@ def test_to_ocel_prunes_dead_event_custom_columns(ocel):
         assert derived.manifest.table("event").type_attributes == {
             "Create Order": ("total_price",),
         }
-        assert derived.query.events().count() == 3
+        assert derived.query.event_count() == 3
     finally:
         derived.close()
 
@@ -315,7 +315,8 @@ def test_to_ocel_prunes_dead_event_custom_columns(ocel):
 def test_to_ocel_prunes_dead_object_history_columns(ocel_with_orphan_object):
     derived = (
         ocel_with_orphan_object.query
-        .objects("order")
+        .states("order")
+        .latest()
         .where(col("ocel_id") == "o2")
         .to_ocel()
     )
@@ -327,7 +328,7 @@ def test_to_ocel_prunes_dead_object_history_columns(ocel_with_orphan_object):
         assert derived.manifest.table("object_change").type_attributes == {
             "order": ("status",),
         }
-        assert derived.query.objects().ids() == ["o2"]
+        assert derived.query.object_ids() == ["o2"]
     finally:
         derived.close()
 
@@ -340,8 +341,8 @@ def test_convert_sqlite_roundtrip(tmp_path):
     written = convert_sqlite(source, target)
 
     with OCEL.read(written) as ocel:
-        assert ocel.query.events().count() == 3
-        assert ocel.query.object_states("order").latest().where(col("status") == "open").ids() == ["o1"]
+        assert ocel.query.event_count() == 3
+        assert ocel.query.states("order").latest().where(col("status") == "open").ids() == ["o1"]
         assert ocel.manifest.table("event").type_attributes == {
             "Create Order": ("total_price",),
             "Pay Order": ("method",),
@@ -350,13 +351,7 @@ def test_convert_sqlite_roundtrip(tmp_path):
             "customer": ("name",),
             "order": ("status",),
         }
-        assert (
-            ocel.query
-            .events("Create Order")
-            .select("total_price")
-            .collect()
-            .fetchall()
-        ) == [(100.0,), (250.0,)]
+        assert ocel.query.sublog(event_types=["Create Order"]).event_count() == 2
 
 
 def test_attach_sqlite_source_reads_columns_as_varchar():

@@ -219,8 +219,8 @@ def object_lifecycle(
     over the selected type-owned attributes, and returns aggregate lifecycle
     statistics such as state frequencies, start/end states, and transitions.
 
-    Use `ocel.query.object_changes(...)` for raw sparse history rows and
-    `ocel.query.object_states(...)` for queryable latest/as-of state tables.
+    Use `ocel.query.changes(...)` for raw sparse history rows and
+    `ocel.query.states(...)` for queryable latest/as-of state tables.
     """
     selected_attributes = _resolve_attributes(
         ocel,
