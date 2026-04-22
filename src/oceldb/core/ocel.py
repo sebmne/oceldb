@@ -111,7 +111,7 @@ class OCEL:
 
         The returned sublog is cached per handle. It is the log-level entry
         point: call ``.sublog(...)`` to narrow by event/object types, or pick
-        a grain (``.flatten(...)``, ``.states(...)``, ``.participations()``, ...)
+        a grain (``.events()``, ``.objects()``, ``.flatten(...)``, ``.states(...)``, ...)
         to move into the row-level query layer.
         """
         from oceldb.api.sublog import Sublog

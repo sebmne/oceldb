@@ -20,17 +20,21 @@ from typing import TYPE_CHECKING
 
 from oceldb.api.states import (
     EventObjectRows,
+    EventRows,
     FlatEventRows,
     ObjectChangeRows,
     ObjectObjectRows,
+    ObjectRows,
     ObjectStateSeed,
 )
 from oceldb.plan.nodes import SourcePlan
 from oceldb.plan.sources import (
     EventObjectSource,
     EventOccurrenceSource,
+    EventSource,
     ObjectChangeSource,
     ObjectObjectSource,
+    ObjectSource,
     ObjectStateSource,
     SublogFilter,
 )
@@ -95,6 +99,22 @@ class Sublog:
         )
 
     # -- grain roots ---------------------------------------------------------
+
+    def events(self) -> EventRows:
+        """Event-grained row query (one row per event in the sublog)."""
+        types = tuple(sorted(self.event_types)) if self.event_types else ()
+        return EventRows(
+            self.ocel,
+            SourcePlan(EventSource(selected_types=types, sublog=self._filter())),
+        )
+
+    def objects(self) -> ObjectRows:
+        """Object-identity-grained row query (one row per object in the sublog)."""
+        types = tuple(sorted(self.object_types)) if self.object_types else ()
+        return ObjectRows(
+            self.ocel,
+            SourcePlan(ObjectSource(selected_types=types, sublog=self._filter())),
+        )
 
     def states(self, *object_types: str) -> ObjectStateSeed:
         """Reconstructed object-state seed.
