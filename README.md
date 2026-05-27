@@ -1,318 +1,307 @@
 # oceldb
 
-**DuckDB-backed OCEL 2.0 storage and lazy query DSL.**
+**DuckDB-backed dataframe layer for OCEL 2.0.**
 
-oceldb keeps object-centric event logs on disk as typed Parquet files and exposes
-a fluent, dataframe-like DSL for filtering, aggregation, sequence analysis, and
-sublog extraction -- all compiled to SQL and executed lazily by DuckDB.
-
-## Features
-
-- **On-disk by default** -- logs stay in Parquet; nothing is materialized into Python objects until you ask.
-- **Lazy query DSL** -- Polars-like API that compiles to SQL. Filter, group, window, and aggregate without writing SQL.
-- **OCEL-aware semantics** -- first-class support for object states, event occurrences, relation predicates, and sublog extraction.
-- **Process discovery** -- built-in OC-DFG (Object-Centric Directly-Follows Graph) mining.
-- **Inspection helpers** -- one-call summaries of types, attributes, time ranges, and relation statistics.
-- **Raw SQL escape hatch** -- drop into DuckDB SQL whenever you need full control.
-- **Minimal dependencies** -- only [DuckDB](https://duckdb.org).
+oceldb exposes object-centric event logs through a typed, lazy dataframe API
+backed by DuckDB. Ibis is used internally, but queries are built through
+oceldb's typed expression wrappers. Logs can be stored as typed Parquet files
+or loaded into ephemeral in-memory storage. Nothing is materialised into
+Python objects until you explicitly call `.execute()`.
 
 ## Installation
 
 ```bash
 pip install oceldb
-```
-
-or with [uv](https://docs.astral.sh/uv/):
-
-```bash
+# or
 uv add oceldb
 ```
 
 Requires Python 3.12+.
 
-Optional PM4Py interoperability:
-
-```bash
-pip install "oceldb[pm4py]"
-```
-
 ## Quick start
 
 ```python
-from oceldb import OCEL, col, count, has_event
-from oceldb.io import convert_sqlite
+from oceldb import OCEL, col, desc
+from oceldb.io import convert_ocel
 
-# Convert an OCEL 2.0 SQLite database to the oceldb Parquet format
-convert_sqlite("running-example.sqlite", "running-example", overwrite=True)
+# Convert an OCEL 2.0 JSON, XML, or SQLite file to the oceldb Parquet layout
+convert_ocel("running-example.jsonocel", "running-example", overwrite=True)
 
-with OCEL.read("running-example") as ocel:
-    # Find all orders that were paid
-    paid_orders = (
-        ocel.query
-        .objects("order")
-        .where(has_event("Pay Order").exists())
-    )
-    print(paid_orders.count())  # 3
+ocel = OCEL.read("running-example")
 
-    # Event counts by type
-    event_counts = (
-        ocel.query
-        .events()
-        .group_by("ocel_type")
-        .agg(count().alias("n"))
-        .sort("n", descending=True)
-    )
-    print(event_counts.collect())
+# Event counts by type
+event_counts = (
+    ocel.events()
+    .group_by("ocel_type")
+    .aggregate(n=col("ocel_id").count())
+    .order_by(desc("n"))
+    .execute()
+)
 
-    # Latest state of open orders
-    open_orders = (
-        ocel.query
-        .object_states("order")
-        .latest()
-        .where(col("status") == "open")
-    )
-    print(open_orders.count())
+# Latest state of each order
+latest_states = ocel.object_states("order").latest().execute()
+
+# Filter objects using a predicate
+from oceldb.predicates import participated_in
+paid_orders = ocel.objects("order").filter(participated_in(ocel, "Pay Order"))
+print(paid_orders.count().execute())
+```
+
+For applications that do not need persistent oceldb output, load the source
+directly into temporary DuckDB storage:
+
+```python
+with OCEL.load("running-example.jsonocel") as ocel:
+    latest_states = ocel.object_states("order").latest().execute()
 ```
 
 ## Core concepts
 
-[OCEL 2.0](https://www.ocel-standard.org/) (Object-Centric Event Logs) extends
-traditional flat event logs with multiple interrelated object types. An order
-fulfillment process, for example, involves orders, items, packages, and
-payments -- each with their own lifecycle. oceldb embraces this structure
-natively.
+[OCEL 2.0](https://www.ocel-standard.org/) extends flat event logs with
+multiple interrelated object types. An order-fulfilment process, for example,
+involves orders, items, packages, and payments — each with their own lifecycle.
+oceldb stores this structure natively.
 
-### Query roots
+### The `OCEL` class
 
-`ocel.query` is the stable entry point. Each root selects a different analytical
-grain:
-
-| Root | Row grain | Use case |
-|------|-----------|----------|
-| `events(...)` | One row per event | Event-level analysis |
-| `objects(...)` | One row per object identity | Object selection, relation predicates |
-| `object_states(...).latest()` | Latest reconstructed state per object | Current attribute snapshots |
-| `object_states(...).as_of(t)` | State at timestamp *t* | Point-in-time analysis |
-| `object_changes(...)` | One row per raw attribute update | Change history |
-| `flatten(...)` | One row per event-object incidence | Sequence and process analysis |
-| `event_objects()` | Raw event-to-object relations | Low-level joins |
-| `object_objects()` | Raw object-to-object relations | Low-level joins |
-
-The key distinction:
-
-- **`objects(...)`** -- identity-oriented, no temporal state
-- **`object_changes(...)`** -- sparse history rows exactly as stored
-- **`object_states(...)`** -- fill-forward reconstructed snapshots for analysis
-
-### Fluent query API
-
-Queries are built by chaining methods and execute only on a terminal call:
+`OCEL.read(path)` opens a persisted Parquet log directory. `OCEL.load(source)`
+imports JSON, XML, SQLite, or a registered custom source into in-memory
+DuckDB tables without writing an oceldb directory. Each returns an `OCEL`
+instance backed by lazy `oceldb.Table` expressions.
 
 ```python
-result = (
-    ocel.query
-    .events("Place Order", "Pay Order")
-    .where(col("amount") > 100)
-    .with_columns(month=col("ocel_time").dt.month())
-    .group_by("ocel_type", "month")
-    .agg(count().alias("n"), avg(col("amount")).alias("avg_amount"))
-    .sort("month")
-    .collect()                  # execute and return DuckDB relation
+ocel = OCEL.read("my-log")
+# or:
+ocel = OCEL.load("source.jsonocel")
+
+ocel.events()                   # all events: ocel_id, ocel_type, ocel_time, …attrs
+ocel.events("Place Order")      # filtered to one type
+ocel.events("A", "B")           # filtered to multiple types
+
+ocel.objects()                  # all objects: ocel_id, ocel_type
+ocel.objects("order")           # filtered to one type
+
+ocel.object_changes("order")    # sparse history rows for object type
+ocel.object_states("order")     # fill-forward state view (see below)
+ocel.event_occurrences("order") # one row per (event, object) incidence
+
+ocel.event_object               # E2O bridge: event_id, event_type, object_id, object_type, qualifier
+ocel.object_object              # O2O bridge: source_id, source_type, target_id, target_type, qualifier
+
+ocel.manifest                   # parsed manifest.json (counts, types, time range)
+```
+
+### Object states
+
+Attributes in OCEL 2.0 are stored as change rows. `object_states` reconstructs
+point-in-time snapshots via fill-forward:
+
+```python
+from datetime import datetime
+
+states = ocel.object_states("order")
+
+states.history()          # all change rows in chronological order
+states.latest()           # most recent state per object
+states.as_of(datetime(2024, 6, 1))  # state at a specific timestamp
+```
+
+### Typed expressions
+
+All accessors return `oceldb.Table` expressions. Use the wrappers exported by
+`oceldb` for expression construction; do not compose queries with Ibis
+objects directly. The wrappers keep the supported expression surface typed
+despite Ibis' dynamic typing internals.
+
+```python
+from oceldb import col, desc, row_number
+
+# Latest object states with a specific attribute value
+heavy = ocel.object_states("Container").latest().filter(
+    col("Weight") > 500
+)
+
+# Event timeline per object with lag/lead
+occ = ocel.event_occurrences("order")
+timeline = occ.mutate(
+    seq=row_number().over(
+        group_by="ocel_object_id", order_by=["ocel_event_time", "ocel_event_id"]
+    ),
+    previous=col("ocel_event_type").lag().over(
+        group_by="ocel_object_id", order_by=["ocel_event_time", "ocel_event_id"]
+    ),
+    next=col("ocel_event_type").lead().over(
+        group_by="ocel_object_id", order_by=["ocel_event_time", "ocel_event_id"]
+    ),
+).order_by("ocel_object_id", "ocel_event_time").execute()
+
+# Aggregation and ordering
+counts = (
+    ocel.events()
+    .group_by("ocel_type")
+    .aggregate(n=col("ocel_id").count())
+    .order_by(desc("n"))
+    .execute()
 )
 ```
 
-**Chainable methods:** `where`, `with_columns`, `select`, `group_by`, `agg`,
-`having`, `sort`, `unique`, `limit`
+The typed surface includes `Table.filter`, `select`, `mutate`, `drop`,
+`rename`, `distinct`, `limit`, `order_by`, `group_by`, `join`, `execute`,
+and `to_pyarrow`; column comparisons and aggregations; and the `col`, `asc`,
+`desc`, `row_number`, and `union` helpers.
 
-**Terminal methods:** `collect`, `count`, `exists`, `scalar`, `to_sql`, `ids`,
-`to_ocel`, `write`
+## Predicates
 
+`oceldb.predicates` provides free-function predicates for OCEL-specific filter
+expressions. All return deferred boolean expressions for use with
+`oceldb.Table.filter()`.
 
-## Optional PM4Py bridge
-
-If you want to hand an `oceldb` dataset to PM4Py, use the optional interop
-module:
+### Object predicates
 
 ```python
-from oceldb import OCEL
-from oceldb.interop import to_pm4py
+from oceldb.predicates import (
+    participated_in,     # object participated in ≥1 event of a given type
+    event_count,         # count of events of a given type per object
+    cooccurrence_count,  # count of co-occurring objects of a given type
+    o2o_count,           # count of O2O-linked objects of a given type
+    o2o_reachable,       # reachability via O2O relations
+)
 
-with OCEL.read("running-example") as ocel:
-    pm4py_ocel = to_pm4py(ocel)
+# Orders that were paid
+paid = ocel.objects("order").filter(participated_in(ocel, "Pay Order"))
+
+# Orders with more than 3 items co-occurring
+busy = ocel.objects("order").filter(cooccurrence_count(ocel, "item") >= 3)
+
+# Objects with exactly two linked children
+ocel.objects("order").filter(o2o_count(ocel, "item") == 2)
+
+# Objects linked (directly or transitively) to a Transport Document
+ocel.objects("Container").filter(o2o_reachable(ocel, "Transport Document"))
 ```
 
-This keeps PM4Py out of the core dependency set while still allowing
-interoperability when you need it.
-
-
-### Column references
-
-Use bare strings for simple references and `col(...)` for expressions:
+### Event predicates
 
 ```python
-# Bare strings in positional arguments
-.select("ocel_id", "status")
-.group_by("ocel_type")
-.sort("ocel_time")
+from oceldb.predicates import (
+    involves,                  # event involves ≥1 object of a given type
+    has_matching_predecessor,  # batch-synchronisation check
+)
 
-# col() for expressions
-.where(col("status") == "open")
-.with_columns(upper_name=col("name").str.upper())
-```
+# Events that involve at least one item
+ocel.events().filter(involves(ocel, "item"))
 
-### Relation predicates
-
-Filter objects or events based on their relationships:
-
-```python
-from oceldb import has_event, has_object, cooccurs_with, linked
-
-# Orders that have a "Pay Order" event
-ocel.query.objects("order").where(has_event("Pay Order").exists())
-
-# Orders co-occurring with at least 3 items
-ocel.query.objects("order").where(cooccurs_with("item").count() >= 3)
-
-# Events involving a "customer" object
-ocel.query.events().where(has_object("customer").exists())
-
-# Objects linked to another object type
-ocel.query.objects("order").where(linked("package").exists())
-```
-
-### Sequence analysis
-
-`flatten(...)` combined with window functions enables process analysis:
-
-```python
-from oceldb import col, row_number
-
-timeline = (
-    ocel.query
-    .flatten("order")
-    .with_columns(
-        seq=row_number().over(
-            partition_by="ocel_object_id",
-            order_by=("ocel_event_time", "ocel_event_id"),
-        ),
-        previous=col("ocel_event_type").lag().over(
-            partition_by="ocel_object_id",
-            order_by=("ocel_event_time", "ocel_event_id"),
-        ),
-        next=col("ocel_event_type").lead().over(
-            partition_by="ocel_object_id",
-            order_by=("ocel_event_time", "ocel_event_id"),
-        ),
-    )
-    .select("ocel_object_id", "seq", "previous", "ocel_event_type", "next")
-    .sort("ocel_object_id", "seq")
+# Sync events that have a matching preceding Group event
+matched = ocel.events("Sync").filter(
+    has_matching_predecessor(ocel, "Group", "member")
 )
 ```
 
-### Sublog extraction
+### Count predicates
 
-Identity-preserving query roots (`events`, `objects`, `object_states`) can
-materialize filtered sublogs:
+`event_count`, `cooccurrence_count`, `o2o_count` return a `CountPredicate`
+object that supports threshold comparisons:
 
 ```python
-# Write a sublog containing only paid orders and their related events
-(
-    ocel.query
-    .objects("order")
-    .where(has_event("Pay Order").exists())
-    .write("paid-orders-sublog", overwrite=True)
-)
+event_count(ocel, "Pay Order") >= 1   # participated at least once
+event_count(ocel, "Pay Order") == 1   # participated exactly once
+event_count(ocel, "Pay Order") == 0   # never participated
 ```
 
 ## Inspection
 
-Direct structural facts about a log, without derived analytics:
+`oceldb.inspect` provides structural summaries read directly from the manifest
+(no SQL):
 
 ```python
-from oceldb.inspect import (
-    overview, event_types, object_types,
-    event_attributes, object_attributes,
-    table_counts, time_range,
-)
+from oceldb.inspect import overview, event_types, object_types
 
-with OCEL.read("my-log") as ocel:
-    info = overview(ocel)
-    print(info.event_count, info.object_count)
+print(overview(ocel))
+# Events:        35,413  (14 types)
+# Objects:       13,910  (7 types)
+# E2O relations: 74,334
+# O2O relations: 15,953
+# Time range:    2023-05-22 11:54:42  →  2024-08-22 12:18:41
 
-    print(event_types(ocel))          # ["Place Order", "Pay Order", ...]
-    print(object_types(ocel))         # ["order", "item", "package", ...]
-    print(event_attributes(ocel))     # {"Place Order": {"amount": "DOUBLE", ...}}
-    print(table_counts(ocel))         # TableCounts(event=120, object=45, ...)
-    print(time_range(ocel))           # TimeRange(min=..., max=...)
+for et in event_types(ocel):      # sorted by count descending
+    print(et.name, et.count, et.attributes)
+
+for ot in object_types(ocel):     # sorted by count descending
+    print(ot.name, ot.object_count, ot.attributes)
 ```
 
-## Discovery
+## Import
 
-Derived analytical artifacts mined from the log:
+Convert an OCEL 2.0 exchange format to the oceldb Parquet layout:
 
 ```python
-from oceldb.discovery import ocdfg
+from oceldb.io import convert_ocel
 
-with OCEL.read("my-log") as ocel:
-    dfg = ocdfg(ocel, "order")
-
-    for node in dfg.nodes:
-        print(f"{node.activity}: {node.count} occurrences")
-
-    for edge in dfg.edges:
-        print(f"{edge.source} -> {edge.target}: {edge.count}x, "
-              f"mean {edge.mean_duration_seconds:.0f}s")
+convert_ocel("source.jsonocel", "target/", overwrite=True)   # JSON
+convert_ocel("source.xml",      "target/", overwrite=True)   # XML
+convert_ocel("source.sqlite",   "target/", overwrite=True)   # SQLite
 ```
 
-## Raw SQL
+The format is inferred from common OCEL file extensions (`.json`, `.jsonocel`,
+`.xml`, `.xmlocel`, `.db`, `.sqlite`, `.sqlite3`). Pass `format="json"` /
+`"xml"` / `"sqlite"` when the filename does not expose the format.
 
-When the DSL isn't enough, drop into DuckDB SQL directly:
+Custom sources can be registered through the shared converter registry:
 
 ```python
-with OCEL.read("my-log") as ocel:
-    result = ocel.sql("SELECT ocel_type, COUNT(*) FROM event GROUP BY 1")
-    print(result.fetchall())
+from oceldb import OCEL
+from oceldb.io import ConverterSpec, register
+
+register(ConverterSpec(format="myformat", source_factory=MySource))
+convert_ocel(source, target, format="myformat")
+# or:
+ocel = OCEL.load(source, format="myformat")
 ```
-
-## Expression reference
-
-| Category | Functions |
-|----------|-----------|
-| Column | `col(name)`, `lit(value)` |
-| Comparison | `==`, `!=`, `<`, `>`, `<=`, `>=`, `.is_null()`, `.not_null()`, `.is_in(...)` |
-| Logic | `&`, `\|`, `~` |
-| Arithmetic | `+`, `-`, `*`, `/` |
-| Aggregation | `count()`, `count_distinct(expr)`, `sum_(expr)`, `avg(expr)`, `min_(expr)`, `max_(expr)` |
-| Functions | `abs_(expr)`, `coalesce(*exprs)`, `round_(expr, n)` |
-| String | `.str.upper()`, `.str.lower()`, `.str.contains(pat)`, `.str.starts_with(s)`, `.str.len()` |
-| Datetime | `.dt.year()`, `.dt.month()`, `.dt.day()`, `.dt.hour()` |
-| Conditional | `when(pred).then(val).otherwise(val)` |
-| Window | `row_number()`, `.lag()`, `.lead()` -- via `.over(partition_by=..., order_by=...)` |
-| Sorting | `asc(expr)`, `desc(expr)` |
-| Relations | `has_event(type)`, `has_object(type)`, `cooccurs_with(type)`, `linked(type)` |
-| Alias | `.alias(name)` |
 
 ## Storage layout
 
-oceldb uses a canonical directory format:
-
 ```
 my-log/
-  manifest.json           # schema, provenance, storage metadata
-  event.parquet           # events (ocel_id, ocel_type, ocel_time, + custom attrs)
-  object.parquet          # object identities (ocel_id, ocel_type)
-  object_change.parquet   # raw sparse object-history rows (ocel_id, ocel_type, ocel_time, ocel_changed_field, + custom attrs)
-  event_object.parquet    # event-to-object relations (ocel_event_id, ocel_object_id, ocel_qualifier)
-  object_object.parquet   # object-to-object relations (ocel_source_id, ocel_target_id, ocel_qualifier)
+  manifest.json                           # schema, provenance, totals
+  events/
+    ocel_type=<url-encoded-type>/
+      data.parquet                        # ocel_id, ocel_time, …attrs; sorted by ocel_time
+  objects/
+    ocel_type=<url-encoded-type>/
+      data.parquet                        # ocel_id
+  object_changes/
+    ocel_type=<url-encoded-type>/
+      data.parquet                        # ocel_id, ocel_time, ocel_changed_field, …attrs
+  event_object.parquet                    # E2O bridge with denormalised type columns
+  object_object.parquet                   # O2O bridge with denormalised type columns (if present)
 ```
 
-Convert from OCEL 2.0 SQLite with:
+Type names with spaces or special characters are URL-encoded in directory names
+(e.g. `ocel_type=Place%20Order`). DuckDB uses Hive partition pruning to skip
+files when filtering by type.
+
+## Type checking
+
+Ibis' expression types are dynamic and produce pervasive errors in strict
+pyright/basedpyright projects. For that reason, Ibis is an implementation
+detail: public query methods return `oceldb.Table`, and supported query
+operations are exposed through the wrappers in `oceldb.expr`.
 
 ```python
-from oceldb.io import convert_sqlite
+from oceldb import OCEL, col, desc
 
-convert_sqlite("source.sqlite", "target-directory", overwrite=True)
+with OCEL.load("source.jsonocel") as ocel:
+    result = (
+        ocel.events("Place Order")
+        .filter(col("amount") > 100)
+        .order_by(desc("ocel_time"))
+        .execute()
+    )
 ```
+
+Keep expressions within this typed API. Importing Ibis expressions directly or
+operating on the underlying raw backend bypasses the wrapper layer and brings
+back the typing problems it is intended to isolate.
 
 ## License
 
