@@ -20,9 +20,12 @@ jobs:
 
       - uses: astral-sh/setup-uv@v7
 
+      - name: Test package
+        if: ${{ hashFiles('tests/**/test_*.py', 'tests/**/*_test.py') != '' }}
+        run: uv run --locked pytest -q
+
       - name: Validate package
         run: |
-          uv run --locked pytest -q
           uv run --locked basedpyright
           uv run --locked ruff check .
           uv run --locked ruff format --check .
