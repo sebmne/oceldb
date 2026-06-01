@@ -115,9 +115,10 @@ type as the case notion:
 flat_orders = ocel.flatten("order").execute()
 ```
 
-The flattened table follows the PM4Py/XES naming convention:
+The flattened table follows the XES naming convention:
 
 - `case:concept:name`: object id of the selected object type
+- `case:<attribute>`: selected object's state at the event timestamp
 - `concept:name`: event activity, from `ocel_type`
 - `time:timestamp`: event timestamp, from `ocel_time`
 - `ocel_event_id`: original OCEL event id

@@ -126,8 +126,10 @@ class OCEL(AbstractContextManager["OCEL"]):
     def flatten(self, ocel_type: str) -> Table:
         """Flatten the OCEL to a case-centric event log for one object type.
 
-        Objects of *ocel_type* become cases. The returned table follows the
-        XES naming convention for classical event logs:
+        Objects of *ocel_type* become cases. Object attributes are resolved to
+        the latest known state at each event timestamp and exposed as
+        ``case:<attribute>`` columns. The returned table follows the XES naming
+        convention for classical event logs:
         ``case:concept:name`` for the case id, ``concept:name`` for activity,
         and ``time:timestamp`` for the event timestamp.
         """
@@ -155,13 +157,39 @@ class OCEL(AbstractContextManager["OCEL"]):
             .distinct()
         )
         cases = objects.join(relations, "case:concept:name")
+        base = cases.join(events, "ocel_event_id")
+
+        state_attrs = [
+            c
+            for c in self.object_states(ocel_type).history().columns
+            if c not in {"ocel_id", "ocel_time"}
+        ]
+        states = self.object_states(ocel_type).history().select(
+            col("ocel_id").name("_oceldb_case_id"),
+            col("ocel_time").name("_oceldb_state_time"),
+            *(col(c).name(f"case:{c}") for c in state_attrs),
+        )
+        joined = base.join(
+            states,
+            [
+                base["case:concept:name"] == states["_oceldb_case_id"],
+                states["_oceldb_state_time"] <= base["time:timestamp"],
+            ],
+            how="left",
+        )
+        rn = row_number().over(
+            group_by=["ocel_event_id", "case:concept:name"],
+            order_by=desc("_oceldb_state_time"),
+        )
 
         return (
-            cases.join(events, "ocel_event_id")
+            joined.mutate(_oceldb_state_rn=rn)
+            .filter(col("_oceldb_state_rn") == 0)
             .select(
                 "ocel_event_id",
                 "case:concept:name",
                 "case:ocel_type",
+                *(f"case:{c}" for c in state_attrs),
                 "concept:name",
                 "time:timestamp",
                 *event_attrs,

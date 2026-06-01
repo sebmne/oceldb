@@ -1,6 +1,6 @@
 [project]
 name = "oceldb"
-version = "0.6.0"
+version = "0.7.0"
 description = "DuckDB-backed OCEL 2.0 storage with typed queries and in-memory loading"
 authors = [{name = "Sebastian Menne", email = "sebastian.menne@rwth-aachen.de"}]
 license = {text = "MIT"}
@@ -9,7 +9,7 @@ requires-python = ">=3.11"
 dependencies = [
     "duckdb>=1.5.1",
     "ibis-framework>=12.0.0",
-    "pandas>=3.0.2",
+    "polars>=1.35.2",
     "pyarrow>=24.0.0",
     "pyarrow-hotfix>=0.7",
 ]

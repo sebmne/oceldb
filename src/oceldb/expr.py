@@ -7,7 +7,7 @@ from typing import Any, Literal, cast
 
 import ibis
 import ibis.expr.types as ir
-import pandas as pd
+import polars as pl
 import pyarrow as pa
 
 JoinKind = Literal["inner", "left", "right", "outer", "asof", "semi", "anti"]
@@ -229,8 +229,8 @@ class Table:
             preds = predicates
         return Table(self._expr.join(other.raw(), preds, how=how))
 
-    def execute(self) -> pd.DataFrame:
-        return cast(pd.DataFrame, self._expr.execute())
+    def execute(self) -> pl.DataFrame:
+        return self._expr.to_polars()
 
     def to_pyarrow(self) -> pa.Table:
         return self._expr.to_pyarrow()
