@@ -164,10 +164,14 @@ class OCEL(AbstractContextManager["OCEL"]):
             for c in self.object_states(ocel_type).history().columns
             if c not in {"ocel_id", "ocel_time"}
         ]
-        states = self.object_states(ocel_type).history().select(
-            col("ocel_id").name("_oceldb_case_id"),
-            col("ocel_time").name("_oceldb_state_time"),
-            *(col(c).name(f"case:{c}") for c in state_attrs),
+        states = (
+            self.object_states(ocel_type)
+            .history()
+            .select(
+                col("ocel_id").name("_oceldb_case_id"),
+                col("ocel_time").name("_oceldb_state_time"),
+                *(col(c).name(f"case:{c}") for c in state_attrs),
+            )
         )
         joined = base.join(
             states,
