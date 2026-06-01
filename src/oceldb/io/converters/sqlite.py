@@ -50,7 +50,7 @@ class SqliteSource:
             ]
             event_attr_cols[m.type_name] = attr_cols
             event_types[m.type_name] = {
-                name: _manifest_type(stype) for name, stype in attr_cols
+                name: _duckdb_type(stype) for name, stype in attr_cols
             }
 
         object_types: dict[str, dict[str, str]] = {}
@@ -67,7 +67,7 @@ class SqliteSource:
             ]
             object_attr_cols[m.type_name] = attr_cols
             object_types[m.type_name] = {
-                name: _manifest_type(stype) for name, stype in attr_cols
+                name: _duckdb_type(stype) for name, stype in attr_cols
             }
 
         event_suffix = {m.type_name: m.table_suffix for m in event_mappings}
@@ -161,7 +161,7 @@ class SqliteSource:
         return [(r[1], r[2]) for r in rows]
 
 
-def _manifest_type(sqlite_type: str) -> str:
+def _duckdb_type(sqlite_type: str) -> str:
     t = sqlite_type.upper()
     if "INT" in t:
         return "INTEGER"
@@ -173,7 +173,7 @@ def _manifest_type(sqlite_type: str) -> str:
 
 
 def _cast_expr(col: str, sqlite_type: str) -> str:
-    duckdb_type = _manifest_type(sqlite_type)
+    duckdb_type = _duckdb_type(sqlite_type)
     identifier = quote_identifier(col)
     if duckdb_type == "VARCHAR":
         return identifier

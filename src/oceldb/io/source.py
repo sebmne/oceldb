@@ -33,7 +33,7 @@ _OCEL_TO_DUCKDB = {
 
 
 def duckdb_to_arrow(duckdb_type: str) -> pa.DataType:
-    """Translate a manifest DuckDB type string to a pyarrow type."""
+    """Translate a canonical DuckDB type string to a pyarrow type."""
     try:
         return _DUCKDB_TO_ARROW[duckdb_type]
     except KeyError as exc:

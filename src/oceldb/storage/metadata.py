@@ -8,6 +8,7 @@ from typing import TYPE_CHECKING
 
 from oceldb.io.sql import quote_identifier
 from oceldb.storage.manifest import EventTypeInfo, Manifest, ObjectTypeInfo
+from oceldb.storage.types import manifest_attributes
 
 if TYPE_CHECKING:
     import duckdb
@@ -51,9 +52,35 @@ def build_manifest(
                 max(ends) if ends else None,
             ],
         },
-        event_types=event_types,
-        object_types=object_types,
+        event_types=_manifest_event_types(event_types),
+        object_types=_manifest_object_types(object_types),
     )
+
+
+def _manifest_event_types(
+    event_types: dict[str, EventTypeInfo],
+) -> dict[str, EventTypeInfo]:
+    return {
+        name: EventTypeInfo(
+            count=info.count,
+            time_range=info.time_range,
+            attributes=manifest_attributes(info.attributes),
+        )
+        for name, info in event_types.items()
+    }
+
+
+def _manifest_object_types(
+    object_types: dict[str, ObjectTypeInfo],
+) -> dict[str, ObjectTypeInfo]:
+    return {
+        name: ObjectTypeInfo(
+            object_count=info.object_count,
+            change_count=info.change_count,
+            attributes=manifest_attributes(info.attributes),
+        )
+        for name, info in object_types.items()
+    }
 
 
 def count_rows(con: duckdb.DuckDBPyConnection, relation_name: str) -> int:

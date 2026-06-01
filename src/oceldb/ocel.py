@@ -123,19 +123,50 @@ class OCEL(AbstractContextManager["OCEL"]):
         """Return reconstructed states for *ocel_type*."""
         return ObjectStates(self._table(f"{ocel_type}_state_history"))
 
-    def event_occurrences(self, ocel_type: str) -> Table:
-        """Return event occurrences for objects of *ocel_type*."""
-        eo = self.event_object.filter(col("ocel_object_type") == ocel_type)
-        ev = self._table("events").select(
+    def flatten(self, ocel_type: str) -> Table:
+        """Flatten the OCEL to a case-centric event log for one object type.
+
+        Objects of *ocel_type* become cases. The returned table follows the
+        XES naming convention for classical event logs:
+        ``case:concept:name`` for the case id, ``concept:name`` for activity,
+        and ``time:timestamp`` for the event timestamp.
+        """
+        event_attrs = [
+            c
+            for c in self.events().columns
+            if c not in {"ocel_id", "ocel_type", "ocel_time"}
+        ]
+        events = self.events().select(
             col("ocel_id").name("ocel_event_id"),
-            col("ocel_time").name("ocel_event_time"),
+            col("ocel_type").name("concept:name"),
+            col("ocel_time").name("time:timestamp"),
+            *event_attrs,
         )
-        return eo.join(ev, "ocel_event_id").select(
-            "ocel_event_id",
-            "ocel_event_type",
-            "ocel_event_time",
-            "ocel_object_id",
-            "ocel_qualifier",
+        objects = self.objects(ocel_type).select(
+            col("ocel_id").name("case:concept:name"),
+            col("ocel_type").name("case:ocel_type"),
+        )
+        relations = (
+            self.event_object.filter(col("ocel_object_type") == ocel_type)
+            .select(
+                "ocel_event_id",
+                col("ocel_object_id").name("case:concept:name"),
+            )
+            .distinct()
+        )
+        cases = objects.join(relations, "case:concept:name")
+
+        return (
+            cases.join(events, "ocel_event_id")
+            .select(
+                "ocel_event_id",
+                "case:concept:name",
+                "case:ocel_type",
+                "concept:name",
+                "time:timestamp",
+                *event_attrs,
+            )
+            .order_by("case:concept:name", "time:timestamp", "ocel_event_id")
         )
 
     @property

@@ -83,7 +83,7 @@ ocel.objects("order")           # filtered to one type
 
 ocel.object_changes("order")    # sparse history rows for object type
 ocel.object_states("order")     # fill-forward state view (see below)
-ocel.event_occurrences("order") # one row per (event, object) incidence
+ocel.flatten("order")           # case-centric event log with orders as cases
 
 ocel.event_object               # E2O bridge: event_id, event_type, object_id, object_type, qualifier
 ocel.object_object              # O2O bridge: source_id, source_type, target_id, target_type, qualifier
@@ -106,6 +106,23 @@ states.latest()           # most recent state per object
 states.as_of(datetime(2024, 6, 1))  # state at a specific timestamp
 ```
 
+### Flattening
+
+Flatten an OCEL to a traditional case-centric event log by choosing one object
+type as the case notion:
+
+```python
+flat_orders = ocel.flatten("order").execute()
+```
+
+The flattened table follows the PM4Py/XES naming convention:
+
+- `case:concept:name`: object id of the selected object type
+- `concept:name`: event activity, from `ocel_type`
+- `time:timestamp`: event timestamp, from `ocel_time`
+- `ocel_event_id`: original OCEL event id
+- event attributes are preserved as additional columns
+
 ### Typed expressions
 
 All accessors return `oceldb.Table` expressions. Use the wrappers exported by
@@ -121,19 +138,19 @@ heavy = ocel.object_states("Container").latest().filter(
     col("Weight") > 500
 )
 
-# Event timeline per object with lag/lead
-occ = ocel.event_occurrences("order")
-timeline = occ.mutate(
+# Event timeline per flattened case with lag/lead
+flat = ocel.flatten("order")
+timeline = flat.mutate(
     seq=row_number().over(
-        group_by="ocel_object_id", order_by=["ocel_event_time", "ocel_event_id"]
+        group_by="case:concept:name", order_by=["time:timestamp", "ocel_event_id"]
     ),
-    previous=col("ocel_event_type").lag().over(
-        group_by="ocel_object_id", order_by=["ocel_event_time", "ocel_event_id"]
+    previous=col("concept:name").lag().over(
+        group_by="case:concept:name", order_by=["time:timestamp", "ocel_event_id"]
     ),
-    next=col("ocel_event_type").lead().over(
-        group_by="ocel_object_id", order_by=["ocel_event_time", "ocel_event_id"]
+    next=col("concept:name").lead().over(
+        group_by="case:concept:name", order_by=["time:timestamp", "ocel_event_id"]
     ),
-).order_by("ocel_object_id", "ocel_event_time").execute()
+).order_by("case:concept:name", "time:timestamp").execute()
 
 # Aggregation and ordering
 counts = (

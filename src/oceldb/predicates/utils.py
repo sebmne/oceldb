@@ -41,6 +41,9 @@ class CountPredicate:
             self._counts.filter(self._counts["n"] == n)["ocel_id"]
         )
 
+    def __ne__(self, n: object) -> Predicate:  # type: ignore[override]
+        return ~self.__eq__(n)
+
     def __hash__(self) -> int:
         return id(self)
 

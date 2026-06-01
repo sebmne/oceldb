@@ -55,6 +55,8 @@ The manifest is the entry point for any tool that needs to understand the log. I
 - The full list of event and object types with their counts, time ranges, and attribute schemas.
 - Global totals (event count, object count, E2O count, O2O count, overall time range).
 
+Attribute schemas use Python-style type labels: `string`, `datetime`, `int`, `float`, and `bool`. The Parquet files still use the corresponding physical column types for efficient DuckDB execution.
+
 Storing this in JSON rather than inside a Parquet file or a DuckDB catalog is a deliberate choice: JSON is universally readable, diff-friendly in version control, and does not require any special tooling to inspect. A tool that only needs to check "how many events are in this log" or "what attributes does the `order` type have" never needs to open a Parquet file.
 
 ### `events/ocel_type=<type>/data.parquet`

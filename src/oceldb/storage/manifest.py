@@ -7,6 +7,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from oceldb.storage.types import manifest_attributes
+
 SUPPORTED_FORMAT_VERSION = "1"
 
 
@@ -61,7 +63,7 @@ class Manifest:
             name: EventTypeInfo(
                 count=info["count"],
                 time_range=(info["time_range"][0], info["time_range"][1]),
-                attributes=dict(info.get("attributes", {})),
+                attributes=manifest_attributes(dict(info.get("attributes", {}))),
             )
             for name, info in raw["event_types"].items()
         }
@@ -70,7 +72,7 @@ class Manifest:
             name: ObjectTypeInfo(
                 object_count=info["object_count"],
                 change_count=info["change_count"],
-                attributes=dict(info.get("attributes", {})),
+                attributes=manifest_attributes(dict(info.get("attributes", {}))),
             )
             for name, info in raw["object_types"].items()
         }
@@ -99,7 +101,7 @@ class Manifest:
                 name: {
                     "count": info.count,
                     "time_range": list(info.time_range),
-                    "attributes": info.attributes,
+                    "attributes": manifest_attributes(info.attributes),
                 }
                 for name, info in self.event_types.items()
             },
@@ -107,7 +109,7 @@ class Manifest:
                 name: {
                     "object_count": info.object_count,
                     "change_count": info.change_count,
-                    "attributes": info.attributes,
+                    "attributes": manifest_attributes(info.attributes),
                 }
                 for name, info in self.object_types.items()
             },
