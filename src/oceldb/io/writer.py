@@ -1,71 +1,80 @@
-"""Write canonical sources as persisted Parquet logs."""
+"""Write SQLite OCEL exports as persisted Parquet logs."""
 
 from __future__ import annotations
 
 import shutil
-from collections.abc import Callable
+from collections.abc import Callable, Generator
 from contextlib import contextmanager
 from pathlib import Path
 from typing import TypeAlias
+from uuid import uuid4
 
 import duckdb
 
-from oceldb.io.source import Canonical, Source, temporary_view
+from oceldb.io.sqlite import (
+    SqliteLog,
+    attach_sqlite,
+    event_object_relation,
+    events_relation,
+    object_changes_relation,
+    object_object_relation,
+    objects_relation,
+)
 from oceldb.io.sql import encode_type_name, quote_identifier, sql_string
 from oceldb.storage.manifest import EventTypeInfo, ObjectTypeInfo
 from oceldb.storage.metadata import build_manifest, count_rows, event_stats
 
 ProgressCallback: TypeAlias = Callable[[str], None]
 
+_PARQUET_COMPRESSION = "zstd"
 
-def write_log(
+
+def write_sqlite_log(
     target: Path,
-    source: Source,
+    source_path: Path,
     *,
-    source_kind: str,
-    source_path: Path | None,
     overwrite: bool = False,
-    compression: str = "zstd",
     progress: ProgressCallback | None = None,
 ) -> None:
-    """Materialize *source* as an oceldb Parquet directory at *target*."""
+    """Convert a SQLite OCEL export to an oceldb Parquet directory."""
     _prepare_target(target, overwrite)
     with _cleanup_on_failure(target):
         target.mkdir(parents=True)
         con = duckdb.connect()
         try:
-            canon = source.attach(con)
+            log = attach_sqlite(con, source_path)
             say: ProgressCallback = progress or (lambda _msg: None)
 
             say("Writing events")
-            event_infos = _write_events(con, target, canon, compression, progress)
+            event_infos = _write_events(con, target, log, progress)
 
             say("Writing objects")
-            object_infos = _write_objects(con, target, canon, compression, progress)
+            object_infos = _write_objects(con, target, log, progress)
 
             say("Writing event_object.parquet")
-            e2o_count = _write_bridge(
+            e2o_count = _write_relation(
                 con,
+                event_object_relation(con),
                 target / "event_object.parquet",
-                canon.event_object,
+                columns=None,
                 order_by=("ocel_object_id", "ocel_event_id"),
-                compression=compression,
             )
 
             say("Writing object_object.parquet")
             o2o_count = 0
-            if canon.object_object is not None:
-                o2o_count = _write_bridge(
+            object_object = object_object_relation(con)
+            if object_object is not None:
+                o2o_count = _write_relation(
                     con,
+                    object_object,
                     target / "object_object.parquet",
-                    canon.object_object,
+                    columns=None,
                     order_by=("ocel_source_id", "ocel_target_id"),
-                    compression=compression,
                 )
 
             say("Writing manifest.json")
             build_manifest(
-                source_kind=source_kind,
+                source_kind="sqlite",
                 source_path=source_path,
                 event_types=event_infos,
                 object_types=object_infos,
@@ -79,24 +88,22 @@ def write_log(
 def _write_events(
     con: duckdb.DuckDBPyConnection,
     target: Path,
-    canon: Canonical,
-    compression: str,
+    log: SqliteLog,
     progress: ProgressCallback | None,
 ) -> dict[str, EventTypeInfo]:
     infos: dict[str, EventTypeInfo] = {}
-    for type_name, attrs in canon.event_types.items():
+    for type_name, attrs in log.event_types.items():
         if progress is not None:
             progress(f"  events/{type_name}")
         out_dir = target / "events" / f"ocel_type={encode_type_name(type_name)}"
         out_dir.mkdir(parents=True)
-        with temporary_view(con, canon.events_for(type_name)) as view:
+        with _temporary_view(con, events_relation(con, log, type_name)) as view:
             _copy_parquet(
                 con,
                 view=view,
                 path=out_dir / "data.parquet",
                 columns=("ocel_id", "ocel_time", *attrs),
                 order_by=("ocel_time",),
-                compression=compression,
             )
             count, lo, hi = event_stats(con, view)
         infos[type_name] = EventTypeInfo(
@@ -108,12 +115,11 @@ def _write_events(
 def _write_objects(
     con: duckdb.DuckDBPyConnection,
     target: Path,
-    canon: Canonical,
-    compression: str,
+    log: SqliteLog,
     progress: ProgressCallback | None,
 ) -> dict[str, ObjectTypeInfo]:
     infos: dict[str, ObjectTypeInfo] = {}
-    for type_name, attrs in canon.object_types.items():
+    for type_name, attrs in log.object_types.items():
         if progress is not None:
             progress(f"  objects/{type_name}")
         encoded = encode_type_name(type_name)
@@ -122,22 +128,20 @@ def _write_objects(
         obj_dir.mkdir(parents=True)
         object_count = _write_relation(
             con,
-            canon.objects_for(type_name),
+            objects_relation(con, type_name),
             obj_dir / "data.parquet",
             columns=("ocel_id",),
             order_by=("ocel_id",),
-            compression=compression,
         )
 
         ch_dir = target / "object_changes" / f"ocel_type={encoded}"
         ch_dir.mkdir(parents=True)
         change_count = _write_relation(
             con,
-            canon.object_changes_for(type_name),
+            object_changes_relation(con, log, type_name),
             ch_dir / "data.parquet",
             columns=("ocel_id", "ocel_time", "ocel_changed_field", *attrs),
             order_by=("ocel_id", "ocel_time"),
-            compression=compression,
         )
 
         infos[type_name] = ObjectTypeInfo(
@@ -148,19 +152,6 @@ def _write_objects(
     return infos
 
 
-def _write_bridge(
-    con: duckdb.DuckDBPyConnection,
-    path: Path,
-    relation: duckdb.DuckDBPyRelation,
-    *,
-    order_by: tuple[str, ...],
-    compression: str,
-) -> int:
-    return _write_relation(
-        con, relation, path, columns=None, order_by=order_by, compression=compression
-    )
-
-
 def _write_relation(
     con: duckdb.DuckDBPyConnection,
     relation: duckdb.DuckDBPyRelation,
@@ -168,16 +159,14 @@ def _write_relation(
     *,
     columns: tuple[str, ...] | None,
     order_by: tuple[str, ...],
-    compression: str,
 ) -> int:
-    with temporary_view(con, relation) as view:
+    with _temporary_view(con, relation) as view:
         _copy_parquet(
             con,
             view=view,
             path=path,
             columns=columns,
             order_by=order_by,
-            compression=compression,
         )
         return count_rows(con, view)
 
@@ -189,7 +178,6 @@ def _copy_parquet(
     path: Path,
     columns: tuple[str, ...] | None,
     order_by: tuple[str, ...],
-    compression: str,
 ) -> None:
     col_sql = (
         "*" if columns is None else ", ".join(quote_identifier(c) for c in columns)
@@ -200,8 +188,20 @@ def _copy_parquet(
             SELECT {col_sql} FROM {quote_identifier(view)}
             ORDER BY {order_sql}
         ) TO {sql_string(str(path))}
-        (FORMAT PARQUET, COMPRESSION {compression})
+        (FORMAT PARQUET, COMPRESSION {_PARQUET_COMPRESSION})
     """)
+
+
+@contextmanager
+def _temporary_view(
+    con: duckdb.DuckDBPyConnection, relation: duckdb.DuckDBPyRelation
+) -> Generator[str]:
+    name = f"_oceldb_relation_{uuid4().hex}"
+    relation.create_view(name)
+    try:
+        yield name
+    finally:
+        con.execute(f'DROP VIEW IF EXISTS "{name}"')
 
 
 def _prepare_target(target: Path, overwrite: bool) -> None:
@@ -218,7 +218,7 @@ def _prepare_target(target: Path, overwrite: bool) -> None:
 
 
 @contextmanager
-def _cleanup_on_failure(target: Path):
+def _cleanup_on_failure(target: Path) -> Generator[None]:
     try:
         yield
     except BaseException:

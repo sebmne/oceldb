@@ -1,8 +1,5 @@
 """OCEL class - the primary user-facing entry point for an oceldb log."""
 
-from __future__ import annotations
-
-from collections.abc import Callable
 from contextlib import AbstractContextManager
 from datetime import datetime
 from pathlib import Path
@@ -64,27 +61,6 @@ class OCEL(AbstractContextManager["OCEL"]):
         con = ibis.duckdb.connect()
         build_views(con, path, manifest)
         return cls(path, con, manifest)
-
-    @classmethod
-    def load(
-        cls,
-        source: object,
-        *,
-        format: str | None = None,
-        progress: Callable[[str], None] | None = None,
-    ) -> Self:
-        """Load an OCEL source into ephemeral DuckDB storage."""
-        from oceldb.io.resolve import resolve_source
-        from oceldb.storage.memory import materialize_memory
-
-        resolved = resolve_source(source, format=format, progress=progress)
-        con, manifest = materialize_memory(
-            resolved.source,
-            source_kind=resolved.kind,
-            source_path=resolved.path,
-            progress=progress,
-        )
-        return cls(None, con, manifest)
 
     def close(self) -> None:
         """Close the underlying DuckDB connection."""

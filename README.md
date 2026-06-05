@@ -4,9 +4,9 @@
 
 oceldb exposes object-centric event logs through a typed, lazy dataframe API
 backed by DuckDB. Ibis is used internally, but queries are built through
-oceldb's typed expression wrappers. Logs can be stored as typed Parquet files
-or loaded into ephemeral in-memory storage. Nothing is materialised into
-Python objects until you explicitly call `.execute()`.
+oceldb's typed expression wrappers. OCEL 2.0 SQLite exports are converted to
+a typed Parquet layout before analysis. Nothing is materialised into Python
+objects until you explicitly call `.execute()`.
 
 ## Installation
 
@@ -16,7 +16,7 @@ pip install oceldb
 uv add oceldb
 ```
 
-Requires Python 3.12+.
+Requires Python 3.11+.
 
 ## Quick start
 
@@ -24,8 +24,8 @@ Requires Python 3.12+.
 from oceldb import OCEL, col, desc
 from oceldb.io import convert_ocel
 
-# Convert an OCEL 2.0 JSON, XML, or SQLite file to the oceldb Parquet layout
-convert_ocel("running-example.jsonocel", "running-example", overwrite=True)
+# Convert an OCEL 2.0 SQLite file to the oceldb Parquet layout
+convert_ocel("running-example.sqlite", "running-example", overwrite=True)
 
 ocel = OCEL.read("running-example")
 
@@ -47,14 +47,6 @@ paid_orders = ocel.objects("order").filter(participated_in(ocel, "Pay Order"))
 print(paid_orders.count().execute())
 ```
 
-For applications that do not need persistent oceldb output, load the source
-directly into temporary DuckDB storage:
-
-```python
-with OCEL.load("running-example.jsonocel") as ocel:
-    latest_states = ocel.object_states("order").latest().execute()
-```
-
 ## Core concepts
 
 [OCEL 2.0](https://www.ocel-standard.org/) extends flat event logs with
@@ -64,15 +56,11 @@ oceldb stores this structure natively.
 
 ### The `OCEL` class
 
-`OCEL.read(path)` opens a persisted Parquet log directory. `OCEL.load(source)`
-imports JSON, XML, SQLite, or a registered custom source into in-memory
-DuckDB tables without writing an oceldb directory. Each returns an `OCEL`
-instance backed by lazy `oceldb.Table` expressions.
+`OCEL.read(path)` opens a persisted Parquet log directory and returns an
+`OCEL` instance backed by lazy `oceldb.Table` expressions.
 
 ```python
 ocel = OCEL.read("my-log")
-# or:
-ocel = OCEL.load("source.jsonocel")
 
 ocel.events()                   # all events: ocel_id, ocel_type, ocel_time, …attrs
 ocel.events("Place Order")      # filtered to one type
@@ -179,14 +167,17 @@ expressions. All return deferred boolean expressions for use with
 ```python
 from oceldb.predicates import (
     participated_in,     # object participated in ≥1 event of a given type
-    event_count,         # count of events of a given type per object
     cooccurrence_count,  # count of co-occurring objects of a given type
+    e2o_count,           # count of E2O-linked events of a given type
     o2o_count,           # count of O2O-linked objects of a given type
     o2o_reachable,       # reachability via O2O relations
 )
 
 # Orders that were paid
 paid = ocel.objects("order").filter(participated_in(ocel, "Pay Order"))
+
+# Orders with exactly one Pay Order event
+ocel.objects("order").filter(e2o_count(ocel, "Pay Order", target="event") == 1)
 
 # Orders with more than 3 items co-occurring
 busy = ocel.objects("order").filter(cooccurrence_count(ocel, "item") >= 3)
@@ -202,12 +193,16 @@ ocel.objects("Container").filter(o2o_reachable(ocel, "Transport Document"))
 
 ```python
 from oceldb.predicates import (
+    e2o_count,                 # count of E2O-linked objects of a given type
     involves,                  # event involves ≥1 object of a given type
     has_matching_predecessor,  # batch-synchronisation check
 )
 
 # Events that involve at least one item
 ocel.events().filter(involves(ocel, "item"))
+
+# Events with exactly two linked items
+ocel.events().filter(e2o_count(ocel, "item") == 2)
 
 # Sync events that have a matching preceding Group event
 matched = ocel.events("Sync").filter(
@@ -217,13 +212,16 @@ matched = ocel.events("Sync").filter(
 
 ### Count predicates
 
-`event_count`, `cooccurrence_count`, `o2o_count` return a `CountPredicate`
+`cooccurrence_count`, `e2o_count`, `o2o_count` return a `CountPredicate`
 object that supports threshold comparisons:
 
+For `e2o_count`, `target="object"` counts objects per event, while
+`target="event"` counts events per object.
+
 ```python
-event_count(ocel, "Pay Order") >= 1   # participated at least once
-event_count(ocel, "Pay Order") == 1   # participated exactly once
-event_count(ocel, "Pay Order") == 0   # never participated
+e2o_count(ocel, "Pay Order", target="event") >= 1  # participated at least once
+e2o_count(ocel, "Pay Order", target="event") == 1  # participated exactly once
+e2o_count(ocel, "Pay Order", target="event") == 0  # never participated
 ```
 
 ## Inspection
@@ -250,31 +248,15 @@ for ot in object_types(ocel):     # sorted by count descending
 
 ## Import
 
-Convert an OCEL 2.0 exchange format to the oceldb Parquet layout:
+Convert an OCEL 2.0 SQLite export to the oceldb Parquet layout:
 
 ```python
 from oceldb.io import convert_ocel
 
-convert_ocel("source.jsonocel", "target/", overwrite=True)   # JSON
-convert_ocel("source.xml",      "target/", overwrite=True)   # XML
-convert_ocel("source.sqlite",   "target/", overwrite=True)   # SQLite
+convert_ocel("source.sqlite", "target/", overwrite=True)
 ```
 
-The format is inferred from common OCEL file extensions (`.json`, `.jsonocel`,
-`.xml`, `.xmlocel`, `.db`, `.sqlite`, `.sqlite3`). Pass `format="json"` /
-`"xml"` / `"sqlite"` when the filename does not expose the format.
-
-Custom sources can be registered through the shared converter registry:
-
-```python
-from oceldb import OCEL
-from oceldb.io import ConverterSpec, register
-
-register(ConverterSpec(format="myformat", source_factory=MySource))
-convert_ocel(source, target, format="myformat")
-# or:
-ocel = OCEL.load(source, format="myformat")
-```
+Supported source extensions are `.db`, `.sqlite`, and `.sqlite3`.
 
 ## Storage layout
 
@@ -308,7 +290,7 @@ operations are exposed through the wrappers in `oceldb.expr`.
 ```python
 from oceldb import OCEL, col, desc
 
-with OCEL.load("source.jsonocel") as ocel:
+with OCEL.read("my-log") as ocel:
     result = (
         ocel.events("Place Order")
         .filter(col("amount") > 100)

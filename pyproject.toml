@@ -1,7 +1,7 @@
 [project]
 name = "oceldb"
 version = "0.7.0"
-description = "DuckDB-backed OCEL 2.0 storage with typed queries and in-memory loading"
+description = "DuckDB-backed OCEL 2.0 analysis with typed lazy queries"
 authors = [{name = "Sebastian Menne", email = "sebastian.menne@rwth-aachen.de"}]
 license = {text = "MIT"}
 readme = "README.md"

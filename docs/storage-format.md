@@ -122,7 +122,7 @@ The object-to-object relation table. Same rationale as `event_object.parquet` fo
 
 ## Compression and encoding
 
-All Parquet files are written with ZSTD level 3 by default. ZSTD was chosen over Snappy (less compression) and GZIP (slower decompression). Level 3 is a reasonable middle ground between ratio and write speed; it can be overridden via the `compression` parameter on the conversion helpers.
+All Parquet files are written with ZSTD compression. ZSTD was chosen over Snappy (less compression) and GZIP (slower decompression) as a reasonable middle ground between ratio and read/write speed.
 
 Parquet's built-in dictionary encoding handles low-cardinality string columns (type names, qualifiers, status values) automatically. No manual encoding hints are needed.
 
