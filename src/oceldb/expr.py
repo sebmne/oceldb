@@ -119,6 +119,12 @@ class Predicate(Column):
 
     __slots__ = ()
 
+    def __bool__(self) -> bool:
+        raise TypeError(
+            "Predicate cannot be evaluated as a Python bool. Use '&', '|', or "
+            "pass multiple predicates to Table.filter()."
+        )
+
     def __invert__(self) -> "Predicate":
         return Predicate(~self._expr)
 

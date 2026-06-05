@@ -7,6 +7,7 @@ from oceldb.predicates.involves import involves
 from oceldb.predicates.o2o_count import o2o_count
 from oceldb.predicates.o2o_reachable import o2o_reachable
 from oceldb.predicates.participated_in import participated_in
+from oceldb.predicates.time_between import time_between
 
 __all__ = [
     "cooccurrence_count",
@@ -16,4 +17,5 @@ __all__ = [
     "o2o_count",
     "o2o_reachable",
     "participated_in",
+    "time_between",
 ]

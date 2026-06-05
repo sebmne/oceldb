@@ -171,6 +171,7 @@ from oceldb.predicates import (
     e2o_count,           # count of E2O-linked events of a given type
     o2o_count,           # count of O2O-linked objects of a given type
     o2o_reachable,       # reachability via O2O relations
+    time_between,        # object has two linked events within time bounds
 )
 
 # Orders that were paid
@@ -187,6 +188,23 @@ ocel.objects("order").filter(o2o_count(ocel, "item") == 2)
 
 # Objects linked (directly or transitively) to a Transport Document
 ocel.objects("Container").filter(o2o_reachable(ocel, "Transport Document"))
+
+# Visitors where check_ticket happens at least 10 minutes after check_visitor
+from datetime import timedelta
+
+delta = time_between(ocel, "check_visitor", "check_ticket")
+ocel.objects("visitor").filter(
+    timedelta(minutes=10) <= delta,
+)
+
+# Visitors where the two events are between 10 and 30 minutes apart
+ocel.objects("visitor").filter(
+    timedelta(minutes=10) <= delta,
+    delta <= timedelta(minutes=30),
+)
+
+# Equivalent single-predicate form
+ocel.objects("visitor").filter(delta.between(timedelta(minutes=10), timedelta(minutes=30)))
 ```
 
 ### Event predicates
