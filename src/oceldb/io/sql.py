@@ -1,7 +1,5 @@
 """DuckDB SQL and partition-name helpers."""
 
-from __future__ import annotations
-
 import urllib.parse
 
 

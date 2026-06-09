@@ -186,3 +186,17 @@ class OCEL(AbstractContextManager["OCEL"]):
     def object_object(self) -> Table:
         """Return object-to-object relations."""
         return self._table("object_object")
+
+
+def ocel(path: str | Path) -> OCEL:
+    """Open a persisted oceldb log.
+
+    This is a short alias for ``OCEL.read(path)``, intended for interactive
+    use in notebooks and scripts:
+
+    ``log = oceldb.ocel("my-log")``
+
+    The returned ``OCEL`` owns a DuckDB connection. Close it explicitly with
+    ``log.close()`` or use it as a context manager when possible.
+    """
+    return OCEL.read(path)

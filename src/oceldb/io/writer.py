@@ -1,7 +1,5 @@
 """Write SQLite OCEL exports as persisted Parquet logs."""
 
-from __future__ import annotations
-
 import shutil
 from collections.abc import Callable, Generator
 from contextlib import contextmanager

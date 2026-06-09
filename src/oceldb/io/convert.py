@@ -1,7 +1,5 @@
 """Convert OCEL sources to persisted logs."""
 
-from __future__ import annotations
-
 from pathlib import Path
 
 from oceldb.io.writer import ProgressCallback, write_sqlite_log

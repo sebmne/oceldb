@@ -264,6 +264,30 @@ for ot in object_types(ocel):     # sorted by count descending
     print(ot.name, ot.object_count, ot.attributes)
 ```
 
+## Analysis helpers
+
+`oceldb.analysis` provides standalone convenience functions. They take an
+`OCEL` instance, compose the regular lazy table API internally, and return
+materialized Polars dataframes.
+
+```python
+from oceldb import OCEL
+from oceldb.analysis import (
+    activity_counts,
+    case_time_bounds,
+    object_timeline,
+    start_activity_counts,
+)
+
+with OCEL.read("my-log") as ocel:
+    print(activity_counts(ocel))
+    print(start_activity_counts(ocel, "order"))
+    print(case_time_bounds(ocel, "order"))
+
+    timeline = object_timeline(ocel, "order").head(20)
+    print(timeline)
+```
+
 ## Import
 
 Convert an OCEL 2.0 SQLite export to the oceldb Parquet layout:

@@ -1,13 +1,12 @@
 """Manifest dataclass and I/O for the oceldb on-disk format."""
 
-from __future__ import annotations
-
 import json
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
 from oceldb.storage.types import manifest_attributes
+
 
 SUPPORTED_FORMAT_VERSION = "1"
 
@@ -48,7 +47,7 @@ class Manifest:
     object_types: dict[str, ObjectTypeInfo]
 
     @classmethod
-    def load(cls, path: Path) -> Manifest:
+    def load(cls, path: Path) -> "Manifest":
         """Load and validate a manifest from *path*."""
         raw: dict[str, Any] = json.loads(path.read_text(encoding="utf-8"))
 

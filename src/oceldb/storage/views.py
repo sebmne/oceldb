@@ -1,7 +1,5 @@
 """Register persisted input and derived logical views for OCEL queries."""
 
-from __future__ import annotations
-
 from pathlib import Path
 
 import ibis

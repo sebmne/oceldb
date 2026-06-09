@@ -1,7 +1,5 @@
 """Type labels used in persisted metadata."""
 
-from __future__ import annotations
-
 _TYPE_ALIASES = {
     "bool": "bool",
     "boolean": "bool",

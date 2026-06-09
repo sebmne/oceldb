@@ -1,17 +1,14 @@
 """Build and measure storage-independent OCEL manifest metadata."""
 
-from __future__ import annotations
-
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import TYPE_CHECKING
 
 from oceldb.io.sql import quote_identifier
 from oceldb.storage.manifest import EventTypeInfo, Manifest, ObjectTypeInfo
 from oceldb.storage.types import manifest_attributes
 
-if TYPE_CHECKING:
-    import duckdb
+
+import duckdb
 
 
 def build_manifest(

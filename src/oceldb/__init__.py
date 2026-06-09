@@ -11,9 +11,11 @@ from oceldb.expr import (
     row_number,
     union,
 )
-from oceldb.ocel import OCEL, ObjectStates
+from oceldb.ocel import OCEL, ObjectStates, ocel
+from oceldb.inspect import overview, object_types, event_types
 
 __all__ = [
+    "ocel",
     "Column",
     "GroupedTable",
     "OCEL",
@@ -25,4 +27,7 @@ __all__ = [
     "desc",
     "row_number",
     "union",
+    "overview",
+    "object_types",
+    "event_types",
 ]

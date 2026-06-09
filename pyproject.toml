@@ -17,6 +17,7 @@ dependencies = [
 [dependency-groups]
 dev = [
     "basedpyright>=1.31.0",
+    "ipykernel>=7.2.0",
     "pytest>=9.0.3",
     "ruff>=0.15.10",
 ]
@@ -31,7 +32,6 @@ exclude = [
     "/.ruff_cache",
     "/.uv-cache",
     "/.venv",
-    "/dist",
     "/test.custom",
 ]
 
