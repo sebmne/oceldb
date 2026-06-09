@@ -1,9 +1,5 @@
-from typing import TYPE_CHECKING
-
 from oceldb.expr import Predicate, Table, col, union
-
-if TYPE_CHECKING:
-    from oceldb.ocel import OCEL
+from oceldb.ocel import OCEL
 
 
 class CountPredicate:
