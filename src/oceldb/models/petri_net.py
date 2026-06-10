@@ -35,7 +35,6 @@ from collections.abc import Iterable
 from dataclasses import dataclass
 from typing import Literal
 
-
 DEFAULT_OBJECT_TYPE = "object"
 
 
@@ -131,8 +130,7 @@ class PetriNet:
     def is_object_centric(self) -> bool:
         """Return whether the net uses more than the default object type."""
         return any(
-            object_type != DEFAULT_OBJECT_TYPE
-            for object_type in self._object_types
+            object_type != DEFAULT_OBJECT_TYPE for object_type in self._object_types
         )
 
     def declare_object_type(self, object_type: str) -> "PetriNet":
@@ -330,9 +328,7 @@ class PetriNet:
         """Return the output arcs of a transition (alias for :meth:`postset`)."""
         return self.postset(transition_name)
 
-    def initial_places(
-        self, object_type: str | None = None
-    ) -> tuple[Place, ...]:
+    def initial_places(self, object_type: str | None = None) -> tuple[Place, ...]:
         """Return places marked initial, optionally filtered by object type."""
         return tuple(
             place
@@ -341,15 +337,12 @@ class PetriNet:
             and (object_type is None or place.object_type == object_type)
         )
 
-    def final_places(
-        self, object_type: str | None = None
-    ) -> tuple[Place, ...]:
+    def final_places(self, object_type: str | None = None) -> tuple[Place, ...]:
         """Return places marked final, optionally filtered by object type."""
         return tuple(
             place
             for place in self._places.values()
-            if place.final
-            and (object_type is None or place.object_type == object_type)
+            if place.final and (object_type is None or place.object_type == object_type)
         )
 
     def reduce_silent_transitions(self) -> "PetriNet":
@@ -403,13 +396,10 @@ class PetriNet:
                 return True
         return False
 
-    def _fuse_silent(
-        self, transition: Transition, *, keep: Place, drop: Place
-    ) -> None:
+    def _fuse_silent(self, transition: Transition, *, keep: Place, drop: Place) -> None:
         self.remove_transition(transition.name)
         for arc in [
-            arc for arc in self._arcs.values()
-            if drop.name in (arc.source, arc.target)
+            arc for arc in self._arcs.values() if drop.name in (arc.source, arc.target)
         ]:
             del self._arcs[(arc.source, arc.target, arc.object_type)]
             new_source = keep.name if arc.source == drop.name else arc.source
@@ -439,35 +429,23 @@ class PetriNet:
 
         for object_type in self._object_types:
             if not self.initial_places(object_type):
-                errors.append(
-                    f"Object type {object_type!r} has no initial place."
-                )
+                errors.append(f"Object type {object_type!r} has no initial place.")
             if not self.final_places(object_type):
-                errors.append(
-                    f"Object type {object_type!r} has no final place."
-                )
+                errors.append(f"Object type {object_type!r} has no final place.")
 
         for transition in self._transitions.values():
             if not self.preset(transition.name):
-                errors.append(
-                    f"Transition {transition.name!r} has no input arc."
-                )
+                errors.append(f"Transition {transition.name!r} has no input arc.")
             if not self.postset(transition.name):
-                errors.append(
-                    f"Transition {transition.name!r} has no output arc."
-                )
+                errors.append(f"Transition {transition.name!r} has no output arc.")
 
         used = {place.object_type for place in self._places.values()}
         used.update(arc.object_type for arc in self._arcs.values())
         unused = [
-            object_type
-            for object_type in self._object_types
-            if object_type not in used
+            object_type for object_type in self._object_types if object_type not in used
         ]
         if unused:
-            errors.append(
-                f"Declared object types are unused: {sorted(unused)}."
-            )
+            errors.append(f"Declared object types are unused: {sorted(unused)}.")
 
         if errors:
             joined = "\n  - ".join(errors)

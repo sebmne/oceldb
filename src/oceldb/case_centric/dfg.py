@@ -48,9 +48,7 @@ class DirectlyFollowsGraph:
         selected = set(activities)
         variants: Counter[tuple[str, ...]] = Counter()
         for variant, count in self.variants.items():
-            projected = tuple(
-                activity for activity in variant if activity in selected
-            )
+            projected = tuple(activity for activity in variant if activity in selected)
             variants[projected] += count
         return dfg_from_variants(variants, threshold=self.threshold)
 

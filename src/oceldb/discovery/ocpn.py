@@ -82,9 +82,7 @@ def _add_subnet(
     )
 
 
-def _select_object_types(
-    ocel: OCEL, object_types: tuple[str, ...]
-) -> tuple[str, ...]:
+def _select_object_types(ocel: OCEL, object_types: tuple[str, ...]) -> tuple[str, ...]:
     if not object_types:
         return tuple(sorted(ocel.manifest.object_types))
 
@@ -102,9 +100,7 @@ def _variable_activities_per_type(
     if not object_types:
         return {}
 
-    result: dict[str, set[str]] = {
-        object_type: set() for object_type in object_types
-    }
+    result: dict[str, set[str]] = {object_type: set() for object_type in object_types}
     counts = (
         ocel.event_object.filter(col("ocel_object_type").isin(list(object_types)))
         .group_by("ocel_event_id", "ocel_event_type", "ocel_object_type")
@@ -119,6 +115,5 @@ def _variable_activities_per_type(
             result[object_type].add(activity)
 
     return {
-        object_type: frozenset(activities)
-        for object_type, activities in result.items()
+        object_type: frozenset(activities) for object_type, activities in result.items()
     }

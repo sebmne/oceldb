@@ -92,9 +92,7 @@ class _Builder:
         current = source
         for index, child in enumerate(tree.children):
             is_last = index == len(tree.children) - 1
-            next_target = (
-                target if is_last else self.add_place((*path, f"seq_{index}"))
-            )
+            next_target = target if is_last else self.add_place((*path, f"seq_{index}"))
             self.translate(child, current, next_target, (*path, f"child_{index}"))
             current = next_target
 
