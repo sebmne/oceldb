@@ -100,7 +100,10 @@ Flatten an OCEL to a traditional case-centric event log by choosing one object
 type as the case notion:
 
 ```python
-flat_orders = ocel.flatten("order").execute()
+from oceldb import CaseCentricEventLog
+
+flat_orders: CaseCentricEventLog = ocel.flatten("order")
+orders = flat_orders.execute()
 ```
 
 The flattened table follows the XES naming convention:
@@ -111,6 +114,8 @@ The flattened table follows the XES naming convention:
 - `time:timestamp`: event timestamp, from `ocel_time`
 - `ocel_event_id`: original OCEL event id
 - event attributes are preserved as additional columns
+
+Case-centric discovery functions accept `CaseCentricEventLog` values.
 
 ### Typed expressions
 
@@ -287,6 +292,42 @@ with OCEL.read("my-log") as ocel:
     timeline = object_timeline(ocel, "order").head(20)
     print(timeline)
 ```
+
+## Discovery
+
+`oceldb.case_centric` provides discovery over flattened case-centric event logs:
+first discover a directly-follows graph, then a process tree, then synthesize a
+Petri net. `oceldb.discovery` provides object-centric discovery directly over
+persisted OCEL tables by applying that case-centric pipeline per selected object
+type, merging transitions with equal activity labels, and marking variable arcs
+where one event can involve multiple objects of the same type.
+
+```python
+from oceldb import OCEL, visualize
+from oceldb.case_centric import (
+    discover_dfg,
+    discover_process_tree,
+    synthesize_petri_net,
+)
+from oceldb.discovery import discover_ocpn
+
+with OCEL.read("my-log") as ocel:
+    dfg = discover_dfg(ocel.flatten("order"))
+    tree = discover_process_tree(dfg)
+    order_net = synthesize_petri_net(tree, object_type="order")
+
+    ocpn = discover_ocpn(ocel, "order", "item")
+    dot = visualize(ocpn)
+    dot.display()  # Inline in Jupyter notebooks
+    dot.render("ocpn", format="svg", cleanup=True)
+
+    print(len(order_net.places), len(ocpn.transitions), len(ocpn.arcs))
+```
+
+In notebooks, `visualize(ocpn)` also displays inline when it is the last
+expression in a cell. The rendered SVG is wrapped in a scrollable, responsive
+HTML container with a download link so larger nets fit notebook output cells
+and can be saved as SVG.
 
 ## Import
 

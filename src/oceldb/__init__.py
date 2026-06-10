@@ -11,8 +11,8 @@ from oceldb.expr import (
     row_number,
     union,
 )
+from oceldb.inspect import event_types, object_types, overview
 from oceldb.ocel import OCEL, ObjectStates, ocel
-from oceldb.inspect import overview, object_types, event_types
 
 __all__ = [
     "ocel",

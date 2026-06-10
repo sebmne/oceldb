@@ -9,6 +9,7 @@ import ibis
 import ibis.backends.duckdb
 
 from oceldb.expr import Table, col, desc, row_number
+from oceldb.case_centric.types import CaseCentricEventLog
 from oceldb.storage.manifest import Manifest
 from oceldb.storage.views import build_views
 
@@ -99,7 +100,7 @@ class OCEL(AbstractContextManager["OCEL"]):
         """Return reconstructed states for *ocel_type*."""
         return ObjectStates(self._table(f"{ocel_type}_state_history"))
 
-    def flatten(self, ocel_type: str) -> Table:
+    def flatten(self, ocel_type: str) -> CaseCentricEventLog:
         """Flatten the OCEL to a case-centric event log for one object type.
 
         Objects of *ocel_type* become cases. Object attributes are resolved to
