@@ -1,58 +1,61 @@
-"""Petri-net synthesis from case-centric process trees."""
+"""Petri-net synthesis on top of the inductive-miner process tree."""
 
-from collections.abc import Iterable
-
-from oceldb.case_centric.process_tree import ProcessTree
+from oceldb.case_centric.inductive_miner.miner import discover_process_tree
+from oceldb.case_centric.inductive_miner.tree import ProcessTree
+from oceldb.case_centric.types import CaseCentricEventLog
 from oceldb.models import PetriNet
 
 
-def synthesize_petri_net(
-    tree: ProcessTree,
+def discover_petri_net(
+    case_log: CaseCentricEventLog,
     *,
-    object_type: str = "case",
-    variable_activities: Iterable[str] = (),
-    net: PetriNet | None = None,
+    case_id: str = "case:concept:name",
+    activity: str = "concept:name",
+    timestamp: str = "time:timestamp",
+    event_id: str = "ocel_event_id",
+    threshold: float = 0.0,
     simplify: bool = True,
 ) -> PetriNet:
-    """Synthesize a Petri net from a case-centric process tree.
+    """Discover a (case-centric) Petri net from a case-centric event log.
 
-    When ``net`` is provided the subnet is added in place, merging visible
-    transitions by label across previously added object types. When
-    ``simplify`` is true (the default), redundant silent transitions are
-    eliminated via :meth:`PetriNet.reduce_silent_transitions` right after
-    the subnet is built, so each object type's subnet is minimized in
-    isolation before more subnets are added.
+    Runs the inductive miner end-to-end: builds the directly-follows graph,
+    derives a process tree, and synthesizes the corresponding workflow net.
+    When ``simplify`` is true (the default), redundant silent transitions
+    are eliminated via :meth:`PetriNet.reduce_silent_transitions`.
+
+    The resulting net uses the default object type. Embedding it into an
+    object-centric Petri net is the caller's responsibility (see
+    :func:`oceldb.discovery.discover_ocpn`).
     """
-    target = net if net is not None else PetriNet()
-    target.declare_object_type(object_type)
-
-    builder = _Builder(
-        target,
-        object_type=object_type,
-        variable_activities=frozenset(variable_activities),
+    tree = discover_process_tree(
+        case_log,
+        case_id=case_id,
+        activity=activity,
+        timestamp=timestamp,
+        event_id=event_id,
+        threshold=threshold,
     )
+    return synthesize(tree, simplify=simplify)
+
+
+def synthesize(tree: ProcessTree, *, simplify: bool = True) -> PetriNet:
+    """Translate a process tree into a workflow net."""
+    net = PetriNet()
+    builder = _Builder(net)
     source = builder.add_place(("source",), initial=True)
     sink = builder.add_place(("sink",), final=True)
     builder.translate(tree, source, sink, ("root",))
 
     if simplify:
-        target.reduce_silent_transitions()
-    return target
+        net.reduce_silent_transitions()
+    return net
 
 
 class _Builder:
-    """Translates a :class:`ProcessTree` into a Petri-net subnet."""
+    """Translates a :class:`ProcessTree` into a workflow-net subnet."""
 
-    def __init__(
-        self,
-        net: PetriNet,
-        *,
-        object_type: str,
-        variable_activities: frozenset[str],
-    ) -> None:
+    def __init__(self, net: PetriNet) -> None:
         self._net = net
-        self._object_type = object_type
-        self._variable = variable_activities
 
     def translate(
         self,
@@ -61,7 +64,6 @@ class _Builder:
         target: str,
         path: tuple[str, ...],
     ) -> None:
-        """Translate ``tree`` into arcs between the ``source`` and ``target`` places."""
         handler = getattr(self, f"_handle_{tree.operator}")
         handler(tree, source, target, path)
 
@@ -71,9 +73,8 @@ class _Builder:
         if tree.label is None:
             raise ValueError("Activity process-tree nodes require a label.")
         transition = self._add_visible_transition(tree.label)
-        variable = tree.label in self._variable
-        self._connect(source, transition, variable=variable)
-        self._connect(transition, target, variable=variable)
+        self._connect(source, transition)
+        self._connect(transition, target)
 
     def _handle_tau(
         self, _tree: ProcessTree, source: str, target: str, path: tuple[str, ...]
@@ -157,15 +158,14 @@ class _Builder:
         self.translate(redo, body_target, entry, (*path, "redo"))
 
     def _loop_entry_place(self, source: str, path: tuple[str, ...]) -> str:
-        """Return a place safe to receive redo arcs.
+        """Return a fresh entry place reached from ``source`` by a silent tau.
 
-        The initial place must not have incoming arcs (workflow-net
-        convention), so when a loop sits directly at the source we insert a
-        fresh entry place reached by a silent transition.
+        Each loop gets its own entry/exit pair so the translation stays
+        strictly block-structured — nested loops don't share an entry
+        place, and the workflow-net convention (initial place has no
+        incoming arcs) holds automatically. Any redundant tau is collapsed
+        by :meth:`PetriNet.reduce_silent_transitions`.
         """
-        if not self._net.place(source).initial:
-            return source
-
         entry = self.add_place((*path, "loop_entry"))
         enter = self._add_silent_transition((*path, "enter"))
         self._connect(source, enter)
@@ -179,15 +179,9 @@ class _Builder:
         initial: bool = False,
         final: bool = False,
     ) -> str:
-        """Add a uniquely-named place identified by its tree path."""
-        name = self._place_name(path)
+        name = "/".join(path)
         if not self._net.has_place(name):
-            self._net.add_place(
-                name,
-                object_type=self._object_type,
-                initial=initial,
-                final=final,
-            )
+            self._net.add_place(name, initial=initial, final=final)
         return name
 
     def _add_visible_transition(self, label: str) -> str:
@@ -196,22 +190,10 @@ class _Builder:
         return label
 
     def _add_silent_transition(self, path: tuple[str, ...]) -> str:
-        name = self._silent_transition_name(path)
+        name = "tau/" + "/".join(path)
         if not self._net.has_transition(name):
             self._net.add_silent_transition(name)
         return name
 
-    def _connect(self, source: str, target: str, *, variable: bool = False) -> None:
-        self._net.add_arc(
-            source,
-            target,
-            object_type=self._object_type,
-            variable=variable,
-            if_exists="ignore",
-        )
-
-    def _place_name(self, path: tuple[str, ...]) -> str:
-        return f"{self._object_type}__" + "/".join(path)
-
-    def _silent_transition_name(self, path: tuple[str, ...]) -> str:
-        return f"tau__{self._object_type}__" + "/".join(path)
+    def _connect(self, source: str, target: str) -> None:
+        self._net.add_arc(source, target, if_exists="ignore")

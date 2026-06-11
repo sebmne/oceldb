@@ -1,4 +1,9 @@
-"""Case-centric directly-follows graph discovery."""
+"""Internal directly-follows graph used by the inductive miner.
+
+The DFG carries the trace variants alongside the activity/edge/start/end
+counts so cuts and fallthroughs can project sublogs by simply rebuilding
+the graph from a filtered set of variants.
+"""
 
 from collections import Counter, defaultdict
 from collections.abc import Iterable, Sequence
@@ -10,7 +15,7 @@ from oceldb.case_centric.types import CaseCentricEventLog
 
 @dataclass(frozen=True)
 class DirectlyFollowsGraph:
-    """Directly-follows graph with trace variants for recursive discovery.
+    """Directly-follows graph with trace variants.
 
     Filtering uses a relative ``threshold`` in ``[0, 1]``:
 
@@ -21,8 +26,6 @@ class DirectlyFollowsGraph:
 
     A threshold of ``0.0`` keeps everything; ``1.0`` keeps only the single
     most frequent activity and the single strongest outgoing edge per source.
-    The default ``0.0`` matches the behaviour of the original inductive miner
-    (no filtering).
     """
 
     activities: frozenset[str]
@@ -34,11 +37,13 @@ class DirectlyFollowsGraph:
 
     @property
     def has_empty_traces(self) -> bool:
-        """Return whether the graph contains projected empty traces."""
         return self.variants[()] > 0
 
+    @property
+    def total_traces(self) -> int:
+        return sum(self.variants.values())
+
     def without_empty_traces(self) -> "DirectlyFollowsGraph":
-        """Return a graph with empty traces removed."""
         variants = Counter(self.variants)
         variants.pop((), None)
         return dfg_from_variants(variants, threshold=self.threshold)
@@ -48,12 +53,12 @@ class DirectlyFollowsGraph:
         selected = set(activities)
         variants: Counter[tuple[str, ...]] = Counter()
         for variant, count in self.variants.items():
-            projected = tuple(activity for activity in variant if activity in selected)
+            projected = tuple(act for act in variant if act in selected)
             variants[projected] += count
         return dfg_from_variants(variants, threshold=self.threshold)
 
 
-def discover_dfg(
+def dfg_from_log(
     case_log: CaseCentricEventLog,
     *,
     case_id: str = "case:concept:name",
@@ -62,13 +67,8 @@ def discover_dfg(
     event_id: str = "ocel_event_id",
     threshold: float = 0.0,
 ) -> DirectlyFollowsGraph:
-    """Discover a directly-follows graph from a case-centric event log.
-
-    ``threshold`` is a relative noise-filtering parameter in ``[0, 1]``.
-    See :class:`DirectlyFollowsGraph` for the exact filtering rules.
-    """
+    """Build a DFG from a case-centric event log."""
     _check_threshold(threshold)
-
     rows = (
         case_log.select(case_id, activity, timestamp, event_id)
         .order_by(case_id, timestamp, event_id)
@@ -77,14 +77,12 @@ def discover_dfg(
     traces: defaultdict[str, list[str]] = defaultdict(list)
     for row in rows.iter_rows(named=True):
         traces[cast(str, row[case_id])].append(cast(str, row[activity]))
-
     return dfg_from_traces(traces.values(), threshold=threshold)
 
 
 def dfg_from_traces(
     traces: Iterable[Sequence[str]], *, threshold: float = 0.0
 ) -> DirectlyFollowsGraph:
-    """Build a directly-follows graph from activity traces."""
     _check_threshold(threshold)
     variants: Counter[tuple[str, ...]] = Counter(tuple(trace) for trace in traces)
     return dfg_from_variants(variants, threshold=threshold)
@@ -93,38 +91,26 @@ def dfg_from_traces(
 def dfg_from_variants(
     variants: Counter[tuple[str, ...]], *, threshold: float = 0.0
 ) -> DirectlyFollowsGraph:
-    """Build a directly-follows graph from counted trace variants.
-
-    Activities and edges below the relative ``threshold`` are removed before
-    the DFG is constructed; see :class:`DirectlyFollowsGraph` for the rules.
-    """
     _check_threshold(threshold)
 
-    # --- activity counts (unfiltered) ---
     activity_counts: Counter[str] = Counter()
     for variant, count in variants.items():
         for act in variant:
             activity_counts[act] += count
 
-    # --- filter activities relative to the most frequent one ---
     max_activity = max(activity_counts.values(), default=0)
     min_activity = threshold * max_activity
-    kept_activities = {
-        act for act, count in activity_counts.items() if count >= min_activity
-    }
+    kept_activities = {a for a, c in activity_counts.items() if c >= min_activity}
 
-    # project variants to kept activities
     filtered_variants: Counter[tuple[str, ...]] = Counter()
     for variant, count in variants.items():
-        projected = tuple(act for act in variant if act in kept_activities)
+        projected = tuple(a for a in variant if a in kept_activities)
         filtered_variants[projected] += count
 
-    # --- rebuild activity/edge/start/end counts from filtered variants ---
     start_counts: Counter[str] = Counter()
     end_counts: Counter[str] = Counter()
     raw_edge_counts: Counter[tuple[str, str]] = Counter()
     activities: set[str] = set()
-
     for variant, count in filtered_variants.items():
         if not variant:
             continue
@@ -134,7 +120,6 @@ def dfg_from_variants(
         for edge in zip(variant, variant[1:]):
             raw_edge_counts[edge] += count
 
-    # --- filter edges relative to the strongest outgoing edge per source ---
     max_outgoing: Counter[str] = Counter()
     for (src, _), count in raw_edge_counts.items():
         if count > max_outgoing[src]:
