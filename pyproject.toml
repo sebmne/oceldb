@@ -1,6 +1,6 @@
 [project]
 name = "oceldb"
-version = "0.9.0"
+version = "0.9.1"
 description = "DuckDB-backed OCEL 2.0 analysis with typed lazy queries"
 authors = [{name = "Sebastian Menne", email = "sebastian.menne@rwth-aachen.de"}]
 license = {text = "MIT"}
