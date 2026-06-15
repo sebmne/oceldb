@@ -104,9 +104,7 @@ def _merge_start_incomplete(
     for group in groups[1:]:
         for act in sorted(group):
             outgoing = {
-                tgt
-                for src, tgt in dfg.edge_counts
-                if src == act and tgt in starts
+                tgt for src, tgt in dfg.edge_counts if src == act and tgt in starts
             }
             if outgoing and outgoing != starts:
                 groups[0].update(group)
@@ -121,9 +119,7 @@ def _merge_end_incomplete(
     for group in groups[1:]:
         for act in sorted(group):
             incoming = {
-                src
-                for src, tgt in dfg.edge_counts
-                if src in ends and tgt == act
+                src for src, tgt in dfg.edge_counts if src in ends and tgt == act
             }
             if incoming and incoming != ends:
                 groups[0].update(group)
