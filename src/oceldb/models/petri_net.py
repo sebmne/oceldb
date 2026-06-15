@@ -354,9 +354,19 @@ class PetriNet:
         (analogous to ε-NFA → NFA elimination). The redundant place is
         removed and any arcs that touched it are rewired to the surviving
         place; variable flags are merged conservatively (variable wins).
+
+        After fusion, silent transitions that share both their preset and
+        their postset (parallel duplicates — e.g., the stacked redos of
+        nested ``loop(loop(X, τ), τ)`` blocks) are collapsed into a single
+        transition.
         """
-        while self._reduce_one_silent_transition():
-            pass
+        changed = True
+        while changed:
+            changed = False
+            while self._reduce_one_silent_transition():
+                changed = True
+            if self._merge_parallel_silent_transitions():
+                changed = True
         return self
 
     def _reduce_one_silent_transition(self) -> bool:
@@ -395,6 +405,29 @@ class PetriNet:
                 self._fuse_silent(transition, keep=p_out, drop=p_in)
                 return True
         return False
+
+    def _merge_parallel_silent_transitions(self) -> bool:
+        """Collapse silent transitions that share preset and postset."""
+        signatures: dict[
+            tuple[frozenset[tuple[str, str, bool]], frozenset[tuple[str, str, bool]]],
+            str,
+        ] = {}
+        merged = False
+        for transition in list(self._transitions.values()):
+            if not transition.silent:
+                continue
+            inputs = self.input_arcs(transition.name)
+            outputs = self.output_arcs(transition.name)
+            in_sig = frozenset((a.source, a.object_type, a.variable) for a in inputs)
+            out_sig = frozenset((a.target, a.object_type, a.variable) for a in outputs)
+            key = (in_sig, out_sig)
+            existing = signatures.get(key)
+            if existing is None:
+                signatures[key] = transition.name
+                continue
+            self.remove_transition(transition.name)
+            merged = True
+        return merged
 
     def _fuse_silent(self, transition: Transition, *, keep: Place, drop: Place) -> None:
         self.remove_transition(transition.name)
