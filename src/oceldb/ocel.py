@@ -1,15 +1,16 @@
 """OCEL class - the primary user-facing entry point for an oceldb log."""
 
+from collections.abc import Mapping
 from contextlib import AbstractContextManager
 from datetime import datetime
 from pathlib import Path
-from typing import Self
+from typing import Any, Self
 
 import ibis
 import ibis.backends.duckdb
 
-from oceldb.expr import Table, col, desc, row_number
 from oceldb.case_centric.types import CaseCentricEventLog
+from oceldb.expr import Table, col, desc, row_number
 from oceldb.storage.manifest import Manifest
 from oceldb.storage.views import build_views
 
@@ -26,12 +27,16 @@ class ObjectStates:
 
     def latest(self) -> Table:
         """Return the most recent state row for each ``ocel_id``."""
-        rn = row_number().over(group_by="ocel_id", order_by=desc("ocel_time"))
+        rn = row_number().over(
+            group_by=["ocel_type", "ocel_id"], order_by=desc("ocel_time")
+        )
         return self._table.mutate(_rn=rn).filter(col("_rn") == 0).drop("_rn")
 
     def as_of(self, t: datetime) -> Table:
         """Return one state row per ``ocel_id`` at or before *t*."""
-        rn = row_number().over(group_by="ocel_id", order_by=desc("ocel_time"))
+        rn = row_number().over(
+            group_by=["ocel_type", "ocel_id"], order_by=desc("ocel_time")
+        )
         return (
             self._table.filter(col("ocel_time") <= t)
             .mutate(_rn=rn)
@@ -78,27 +83,58 @@ class OCEL(AbstractContextManager["OCEL"]):
     def _table(self, name: str) -> Table:
         return Table(self.con.table(name))
 
+    @staticmethod
+    def _union_attributes(
+        type_infos: Mapping[str, Any], types: tuple[str, ...]
+    ) -> list[str]:
+        seen: set[str] = set()
+        attrs: list[str] = []
+        for name in types:
+            info = type_infos.get(name)
+            if info is None:
+                continue
+            for attr in info.attributes:
+                if attr not in seen:
+                    seen.add(attr)
+                    attrs.append(attr)
+        return attrs
+
     def events(self, *types: str) -> Table:
         """Return events, optionally filtered by type."""
         t = self._table("events")
         if types:
+            attrs = self._union_attributes(self.manifest.event_types, types)
+            t = t.filter(t["ocel_type"].isin(list(types))).select(
+                "ocel_id", "ocel_time", *attrs, "ocel_type"
+            )
+        return t
+
+    def objects(self, *types: str) -> Table:
+        """Return object identities, optionally filtered by type."""
+        t = self._table("objects")
+        if types:
             t = t.filter(t["ocel_type"].isin(list(types)))
         return t
 
-    def objects(self, ocel_type: str | None = None) -> Table:
-        """Return object identities, optionally filtered by type."""
-        t = self._table("objects")
-        if ocel_type is not None:
-            t = t.filter(t["ocel_type"] == ocel_type)
+    def object_changes(self, *types: str) -> Table:
+        """Return raw attribute-change rows, optionally filtered by type."""
+        t = self._table("object_changes")
+        if types:
+            attrs = self._union_attributes(self.manifest.object_types, types)
+            t = t.filter(t["ocel_type"].isin(list(types))).select(
+                "ocel_id", "ocel_time", *attrs, "ocel_type"
+            )
         return t
 
-    def object_changes(self, ocel_type: str) -> Table:
-        """Return raw attribute-change rows for *ocel_type*."""
-        return self._table(f"object_changes_{ocel_type}")
-
-    def object_states(self, ocel_type: str) -> ObjectStates:
-        """Return reconstructed states for *ocel_type*."""
-        return ObjectStates(self._table(f"{ocel_type}_state_history"))
+    def object_states(self, *types: str) -> ObjectStates:
+        """Return reconstructed object states, optionally filtered by type."""
+        t = self._table("object_states")
+        if types:
+            attrs = self._union_attributes(self.manifest.object_types, types)
+            t = t.filter(t["ocel_type"].isin(list(types))).select(
+                "ocel_id", "ocel_time", *attrs, "ocel_type"
+            )
+        return ObjectStates(t)
 
     def flatten(self, ocel_type: str) -> CaseCentricEventLog:
         """Flatten the OCEL to a case-centric event log for one object type.
@@ -139,7 +175,7 @@ class OCEL(AbstractContextManager["OCEL"]):
         state_attrs = [
             c
             for c in self.object_states(ocel_type).history().columns
-            if c not in {"ocel_id", "ocel_time"}
+            if c not in {"ocel_id", "ocel_type", "ocel_time"}
         ]
         states = (
             self.object_states(ocel_type)
