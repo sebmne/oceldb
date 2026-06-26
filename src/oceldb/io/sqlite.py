@@ -1,207 +1,302 @@
-"""SQLite SQL relations for OCEL 2.0 imports."""
+"""Convert OCEL 2.0 SQLite exports to oceldb's Parquet layout.
 
+DuckDB attaches the SQLite log read-only and streams each per-type table into the
+Hive-partitioned layout (see :mod:`oceldb.store`) via a per-type ``COPY``. This is
+the only DuckDB-backed code in the core library; it is imported lazily so
+``import oceldb`` stays pure-Polars.
+
+Expected OCEL 2.0 SQLite schema: ``event``/``object`` master tables,
+``event_map_type`` / ``object_map_type`` (type name -> table suffix), per-type
+``event_<suffix>`` / ``object_<suffix>`` tables, and ``event_object`` /
+``object_object`` relations. The cast logic mirrors the original battle-tested
+converter (declared SQLite types -> DuckDB types, integers -> ``BIGINT``), and
+the epoch-row trick puts initial object state at ``1970-01-01``.
+"""
+
+import shutil
 import sqlite3
+from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING
+from uuid import uuid4
 
-from oceldb.io.sql import quote_identifier, sql_string
+import duckdb
+
+from oceldb.store import encode_type_name
+from oceldb.utils.cache import cached_conversion
 
 if TYPE_CHECKING:
-    import duckdb
+    from oceldb.ocel import OCEL
+
+_EPOCH = "TIMESTAMP '1970-01-01 00:00:00'"
+_EVENT_CORE = {"ocel_id", "ocel_time"}
+_OBJECT_CHANGE_CORE = {"ocel_id", "ocel_time", "ocel_changed_field"}
+
+_E2O_QUERY = (
+    "SELECT eo.ocel_event_id, e.ocel_type AS ocel_event_type, "
+    "eo.ocel_object_id, o.ocel_type AS ocel_object_type, eo.ocel_qualifier "
+    "FROM src.event_object eo "
+    "JOIN src.event  e ON eo.ocel_event_id  = e.ocel_id "
+    "JOIN src.object o ON eo.ocel_object_id = o.ocel_id "
+    "ORDER BY eo.ocel_object_id, eo.ocel_event_id"
+)
+_O2O_QUERY = (
+    "SELECT oo.ocel_source_id, s.ocel_type AS ocel_source_type, "
+    "oo.ocel_target_id, t.ocel_type AS ocel_target_type, oo.ocel_qualifier "
+    "FROM src.object_object oo "
+    "JOIN src.object s ON oo.ocel_source_id = s.ocel_id "
+    "JOIN src.object t ON oo.ocel_target_id = t.ocel_id "
+    "ORDER BY oo.ocel_source_id, oo.ocel_target_id"
+)
 
 
-@dataclass(frozen=True)
-class _TypeMapping:
-    type_name: str
-    table_suffix: str
+def convert_sqlite(
+    source: str | Path,
+    target: str | Path,
+    *,
+    overwrite: bool = False,
+) -> None:
+    """Convert an OCEL 2.0 SQLite export to a native oceldb directory.
 
+    Args:
+        source: Path to an OCEL 2.0 SQLite database. Supported inputs are the
+            standard OCEL 2.0 SQLite schema with ``event`` and ``object`` master
+            tables, per-type event/object tables, and relation tables.
+        target: Destination directory for the oceldb Parquet layout.
+        overwrite: Replace an existing file or directory at ``target`` when
+            ``True``. The default raises :class:`FileExistsError`.
 
-@dataclass(frozen=True)
-class SqliteLog:
-    """SQLite schema details needed to build canonical OCEL relations."""
+    Raises:
+        FileNotFoundError: If ``source`` does not exist.
+        FileExistsError: If ``target`` exists and ``overwrite`` is ``False``.
+        duckdb.Error: If DuckDB cannot attach or query the SQLite database.
+        sqlite3.Error: If SQLite schema inspection fails.
 
-    event_types: dict[str, dict[str, str]]
-    object_types: dict[str, dict[str, str]]
-    event_attr_cols: dict[str, list[tuple[str, str]]]
-    object_attr_cols: dict[str, list[tuple[str, str]]]
-    object_has_changed_field: dict[str, bool]
-    event_suffix: dict[str, str]
-    object_suffix: dict[str, str]
+    Notes:
+        The conversion writes to a temporary sibling directory and renames it
+        into place after all Parquet files have been produced. Integer columns
+        are cast to DuckDB ``BIGINT`` to avoid 32-bit overflow in large logs.
 
-
-def attach_sqlite(con: "duckdb.DuckDBPyConnection", source: Path) -> SqliteLog:
-    """Attach an OCEL 2.0 SQLite export and read its type mappings."""
+    Examples:
+        >>> from oceldb.io import convert_sqlite
+        >>> convert_sqlite("running-example.sqlite", "running-example")
+    """
+    source = Path(source)
+    target = Path(target)
     if not source.exists():
         raise FileNotFoundError(f"Source not found: {source}")
-
-    con.execute("INSTALL sqlite; LOAD sqlite")
-    con.execute("SET sqlite_all_varchar = true")
-    con.execute(f"ATTACH {sql_string(str(source))} AS src (TYPE SQLITE, READ_ONLY)")
-
-    event_mappings = _read_mapping(con, "event_map_type")
-    object_mappings = _read_mapping(con, "object_map_type")
-
-    event_types: dict[str, dict[str, str]] = {}
-    event_attr_cols: dict[str, list[tuple[str, str]]] = {}
-    for mapping in event_mappings:
-        attr_cols = [
-            (name, sqlite_type)
-            for name, sqlite_type in _pragma_columns(
-                source, f"event_{mapping.table_suffix}"
-            )
-            if name not in ("ocel_id", "ocel_time")
-        ]
-        event_attr_cols[mapping.type_name] = attr_cols
-        event_types[mapping.type_name] = {
-            name: _duckdb_type(sqlite_type) for name, sqlite_type in attr_cols
-        }
-
-    object_types: dict[str, dict[str, str]] = {}
-    object_attr_cols: dict[str, list[tuple[str, str]]] = {}
-    object_has_changed_field: dict[str, bool] = {}
-    for mapping in object_mappings:
-        cols = _pragma_columns(source, f"object_{mapping.table_suffix}")
-        col_names = {name for name, _ in cols}
-        object_has_changed_field[mapping.type_name] = "ocel_changed_field" in col_names
-        attr_cols = [
-            (name, sqlite_type)
-            for name, sqlite_type in cols
-            if name not in ("ocel_id", "ocel_time", "ocel_changed_field")
-        ]
-        object_attr_cols[mapping.type_name] = attr_cols
-        object_types[mapping.type_name] = {
-            name: _duckdb_type(sqlite_type) for name, sqlite_type in attr_cols
-        }
-
-    return SqliteLog(
-        event_types=event_types,
-        object_types=object_types,
-        event_attr_cols=event_attr_cols,
-        object_attr_cols=object_attr_cols,
-        object_has_changed_field=object_has_changed_field,
-        event_suffix={
-            mapping.type_name: mapping.table_suffix for mapping in event_mappings
-        },
-        object_suffix={
-            mapping.type_name: mapping.table_suffix for mapping in object_mappings
-        },
-    )
-
-
-def events_relation(
-    con: "duckdb.DuckDBPyConnection", log: SqliteLog, type_name: str
-) -> "duckdb.DuckDBPyRelation":
-    attrs = log.event_attr_cols[type_name]
-    select = "ocel_id, TRY_CAST(ocel_time AS TIMESTAMP) AS ocel_time"
-    for name, sqlite_type in attrs:
-        select += f", {_cast_expr(name, sqlite_type)}"
-    table = quote_identifier(f"event_{log.event_suffix[type_name]}")
-    return con.sql(f"SELECT {select} FROM src.{table}")
-
-
-def objects_relation(
-    con: "duckdb.DuckDBPyConnection", type_name: str
-) -> "duckdb.DuckDBPyRelation":
-    return con.sql(
-        f"SELECT ocel_id FROM src.object WHERE ocel_type = {sql_string(type_name)}"
-    )
-
-
-def object_changes_relation(
-    con: "duckdb.DuckDBPyConnection", log: SqliteLog, type_name: str
-) -> "duckdb.DuckDBPyRelation":
-    attrs = log.object_attr_cols[type_name]
-    if log.object_has_changed_field[type_name]:
-        time_expr = (
-            "CASE WHEN ocel_changed_field IS NULL "
-            "THEN TIMESTAMP '1970-01-01 00:00:00' "
-            "ELSE TRY_CAST(ocel_time AS TIMESTAMP) END AS ocel_time"
+    if target.exists() and not overwrite:
+        raise FileExistsError(
+            f"Target already exists: {target}. Pass overwrite=True to replace it."
         )
-        changed_field_expr = "ocel_changed_field"
-    else:
-        time_expr = "TIMESTAMP '1970-01-01 00:00:00' AS ocel_time"
-        changed_field_expr = "CAST(NULL AS VARCHAR) AS ocel_changed_field"
 
-    select = f"ocel_id, {time_expr}, {changed_field_expr}"
-    for name, sqlite_type in attrs:
-        select += f", {_cast_expr(name, sqlite_type)}"
-    table = quote_identifier(f"object_{log.object_suffix[type_name]}")
-    return con.sql(f"SELECT {select} FROM src.{table}")
+    staging = target.with_name(f"{target.name}.tmp-{uuid4().hex}")
+    staging.mkdir(parents=True)
+    try:
+        con = duckdb.connect()
+        try:
+            con.execute("INSTALL sqlite; LOAD sqlite")
+            con.execute("SET sqlite_all_varchar = true")
+            con.execute(
+                f"ATTACH {_sql_string(str(source))} AS src (TYPE SQLITE, READ_ONLY)"
+            )
+            _write_events(con, source, staging)
+            _write_objects_and_changes(con, source, staging)
+            _copy(con, _E2O_QUERY, staging / "event_object.parquet")
+            if "object_object" in _table_names(source) and _count(con, "object_object"):
+                _copy(con, _O2O_QUERY, staging / "object_object.parquet")
+        finally:
+            con.close()
+    except BaseException:
+        shutil.rmtree(staging, ignore_errors=True)
+        raise
+
+    if target.is_dir():
+        shutil.rmtree(target)
+    elif target.exists():
+        target.unlink()
+    staging.rename(target)
 
 
-def event_object_relation(
-    con: "duckdb.DuckDBPyConnection",
-) -> "duckdb.DuckDBPyRelation":
-    return con.sql("""
-        SELECT
-            eo.ocel_event_id,
-            e.ocel_type  AS ocel_event_type,
-            eo.ocel_object_id,
-            o.ocel_type  AS ocel_object_type,
-            eo.ocel_qualifier
-        FROM src.event_object eo
-        JOIN src.event  e ON eo.ocel_event_id  = e.ocel_id
-        JOIN src.object o ON eo.ocel_object_id = o.ocel_id
-    """)
+def _read_sqlite(source_path: Path, target_dir: Path) -> None:
+    """Convert ``source_path`` into ``target_dir`` for the cache wrapper."""
+    convert_sqlite(source_path, target_dir, overwrite=True)
 
 
-def object_object_relation(
-    con: "duckdb.DuckDBPyConnection",
-) -> "duckdb.DuckDBPyRelation | None":
-    return _relation_if_nonempty(
-        con,
-        """
-        SELECT
-            oo.ocel_source_id,
-            s.ocel_type AS ocel_source_type,
-            oo.ocel_target_id,
-            t.ocel_type AS ocel_target_type,
-            oo.ocel_qualifier
-        FROM src.object_object oo
-        JOIN src.object s ON oo.ocel_source_id = s.ocel_id
-        JOIN src.object t ON oo.ocel_target_id = t.ocel_id
-    """,
+_read_sqlite.__name__ = "read_sqlite"
+read_sqlite: Callable[[str | Path], "OCEL"] = cached_conversion(_read_sqlite)
+read_sqlite.__doc__ = """Open an OCEL 2.0 SQLite export as an :class:`oceldb.OCEL`.
+
+Args:
+    source: Path to an OCEL 2.0 SQLite database.
+
+Returns:
+    An ``OCEL`` backed by a cached native Parquet conversion of ``source``.
+
+Raises:
+    FileNotFoundError: If ``source`` does not exist.
+    duckdb.Error: If DuckDB cannot attach or query the SQLite database.
+    sqlite3.Error: If SQLite schema inspection fails.
+
+Notes:
+    The cache key includes the absolute source path, file size, and modification
+    time. Re-reading an unchanged file reuses the cached conversion; changing the
+    SQLite file creates a new cache entry.
+
+Examples:
+    >>> from oceldb import read_sqlite
+    >>> ocel = read_sqlite("running-example.sqlite")
+    >>> ocel.events().collect()
+"""
+
+
+@dataclass(frozen=True)
+class _Mapping:
+    type_name: str
+    suffix: str
+
+
+def _write_events(con: duckdb.DuckDBPyConnection, source: Path, staging: Path) -> None:
+    base = staging / "events"
+    base.mkdir()
+    for mapping in _mappings(con, "event_map_type"):
+        attrs = _attribute_columns(source, f"event_{mapping.suffix}", _EVENT_CORE)
+        columns = [
+            "ocel_id",
+            "TRY_CAST(ocel_time AS TIMESTAMP) AS ocel_time",
+            *(_cast_expr(name, sqlite_type) for name, sqlite_type in attrs),
+        ]
+        out_dir = base / f"ocel_type={encode_type_name(mapping.type_name)}"
+        out_dir.mkdir()
+        _copy(
+            con,
+            f"SELECT {', '.join(columns)} "
+            f"FROM src.{_quote('event_' + mapping.suffix)} ORDER BY ocel_time",
+            out_dir / "data.parquet",
+        )
+
+
+def _write_objects_and_changes(
+    con: duckdb.DuckDBPyConnection, source: Path, staging: Path
+) -> None:
+    objects_base = staging / "objects"
+    objects_base.mkdir()
+    changes_base = staging / "object_changes"
+    changes_base.mkdir()
+
+    for mapping in _mappings(con, "object_map_type"):
+        encoded = encode_type_name(mapping.type_name)
+
+        obj_dir = objects_base / f"ocel_type={encoded}"
+        obj_dir.mkdir()
+        _copy(
+            con,
+            f"SELECT ocel_id FROM src.object "
+            f"WHERE ocel_type = {_sql_string(mapping.type_name)} ORDER BY ocel_id",
+            obj_dir / "data.parquet",
+        )
+
+        table = f"object_{mapping.suffix}"
+        columns_info = _pragma_columns(source, table)
+        names = {name for name, _ in columns_info}
+        attrs = [
+            (name, sqlite_type)
+            for name, sqlite_type in columns_info
+            if name not in _OBJECT_CHANGE_CORE
+        ]
+        if "ocel_changed_field" in names:
+            time_expr = (
+                "CASE WHEN ocel_changed_field IS NULL THEN "
+                f"{_EPOCH} ELSE TRY_CAST(ocel_time AS TIMESTAMP) END AS ocel_time"
+            )
+            changed_expr = "ocel_changed_field"
+        else:
+            time_expr = f"{_EPOCH} AS ocel_time"
+            changed_expr = "CAST(NULL AS VARCHAR) AS ocel_changed_field"
+        columns = [
+            "ocel_id",
+            time_expr,
+            changed_expr,
+            *(_cast_expr(name, sqlite_type) for name, sqlite_type in attrs),
+        ]
+        ch_dir = changes_base / f"ocel_type={encoded}"
+        ch_dir.mkdir()
+        _copy(
+            con,
+            f"SELECT {', '.join(columns)} "
+            f"FROM src.{_quote(table)} ORDER BY ocel_id, ocel_time",
+            ch_dir / "data.parquet",
+        )
+
+
+def _copy(con: duckdb.DuckDBPyConnection, query: str, path: Path) -> None:
+    con.execute(
+        f"COPY ({query}) TO {_sql_string(str(path))} (FORMAT PARQUET, COMPRESSION ZSTD)"
     )
 
 
-def _read_mapping(con: "duckdb.DuckDBPyConnection", table: str) -> list[_TypeMapping]:
+def _mappings(con: duckdb.DuckDBPyConnection, table: str) -> list[_Mapping]:
     rows = con.execute(
-        f"SELECT ocel_type, ocel_type_map FROM src.{quote_identifier(table)}"
+        f"SELECT ocel_type, ocel_type_map FROM src.{_quote(table)} ORDER BY ocel_type"
     ).fetchall()
-    return [_TypeMapping(type_name=row[0], table_suffix=row[1]) for row in rows]
+    return [_Mapping(str(row[0]), str(row[1])) for row in rows]
 
 
-def _pragma_columns(source: Path, table_name: str) -> list[tuple[str, str]]:
-    # DuckDB hides declared types when sqlite_all_varchar is enabled.
-    with sqlite3.connect(source) as sc:
-        rows = sc.execute(f'PRAGMA table_info("{table_name}")').fetchall()
-    return [(row[1], row[2]) for row in rows]
+def _count(con: duckdb.DuckDBPyConnection, table: str) -> int:
+    row = con.execute(f"SELECT COUNT(*) FROM src.{_quote(table)}").fetchone()
+    return int(row[0]) if row else 0
 
 
-def _relation_if_nonempty(
-    con: "duckdb.DuckDBPyConnection", sql: str
-) -> "duckdb.DuckDBPyRelation | None":
-    row = con.execute(f"SELECT COUNT(*) FROM ({sql})").fetchone()
-    if not row or int(row[0]) == 0:
-        return None
-    return con.sql(sql)
+def _table_names(source: Path) -> set[str]:
+    with sqlite3.connect(source) as connection:
+        rows = connection.execute(
+            "SELECT name FROM sqlite_master WHERE type = 'table'"
+        ).fetchall()
+    return {str(row[0]) for row in rows}
+
+
+def _attribute_columns(
+    source: Path, table: str, core: set[str]
+) -> list[tuple[str, str]]:
+    return [
+        (name, sqlite_type)
+        for name, sqlite_type in _pragma_columns(source, table)
+        if name not in core
+    ]
+
+
+def _pragma_columns(source: Path, table: str) -> list[tuple[str, str]]:
+    # DuckDB hides declared column types under sqlite_all_varchar, so read the
+    # schema straight from SQLite to drive the casts.
+    with sqlite3.connect(source) as connection:
+        rows = connection.execute(f"PRAGMA table_info({_quote(table)})").fetchall()
+    return [(str(row[1]), str(row[2])) for row in rows]
+
+
+def _cast_expr(column: str, sqlite_type: str) -> str:
+    duckdb_type = _duckdb_type(sqlite_type)
+    identifier = _quote(column)
+    if duckdb_type == "VARCHAR":
+        return identifier
+    return f"TRY_CAST({identifier} AS {duckdb_type}) AS {identifier}"
 
 
 def _duckdb_type(sqlite_type: str) -> str:
-    t = sqlite_type.upper()
-    if "INT" in t:
-        return "INTEGER"
-    if any(k in t for k in ("REAL", "FLOAT", "DOUBLE", "NUMERIC", "DECIMAL")):
+    upper = sqlite_type.upper()
+    if "INT" in upper:
+        # int64: matches the existing converted logs and avoids 32-bit overflow.
+        return "BIGINT"
+    if any(key in upper for key in ("REAL", "FLOAT", "DOUBLE", "NUMERIC", "DECIMAL")):
         return "DOUBLE"
-    if "BOOL" in t:
+    if "BOOL" in upper:
         return "BOOLEAN"
     return "VARCHAR"
 
 
-def _cast_expr(col: str, sqlite_type: str) -> str:
-    duckdb_type = _duckdb_type(sqlite_type)
-    identifier = quote_identifier(col)
-    if duckdb_type == "VARCHAR":
-        return identifier
-    return f"TRY_CAST({identifier} AS {duckdb_type}) AS {identifier}"
+def _quote(name: str) -> str:
+    return '"' + name.replace('"', '""') + '"'
+
+
+def _sql_string(value: str) -> str:
+    return "'" + value.replace("'", "''") + "'"

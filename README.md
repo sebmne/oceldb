@@ -1,12 +1,15 @@
 # oceldb
 
-**DuckDB-backed dataframe layer for OCEL 2.0.**
+Polars-backed access to OCEL 2.0 event logs.
 
-oceldb exposes object-centric event logs through a typed, lazy dataframe API
-backed by DuckDB. Ibis is used internally, but queries are built through
-oceldb's typed expression wrappers. OCEL 2.0 SQLite exports are converted to
-a typed Parquet layout before analysis. Nothing is materialised into Python
-objects until you explicitly call `.execute()`.
+oceldb represents an object-centric event log as five lazy Polars tables:
+events, objects, object changes, event-object relations, and object-object
+relations. The native on-disk format is Parquet, split by event or object type
+for compact storage and fast type-filtered scans. OCEL 2.0 SQLite exports can
+be converted to that layout or opened through a conversion cache.
+
+All query methods return `polars.LazyFrame`. Nothing is materialized until you
+call `collect()`, `sink_parquet()`, or another Polars execution method.
 
 ## Installation
 
@@ -18,374 +21,171 @@ uv add oceldb
 
 Requires Python 3.11+.
 
-## Quick start
+## Quick Start
 
 ```python
-from oceldb import OCEL, col, desc
-from oceldb.io import convert_ocel
+from oceldb import read_sqlite
 
-# Convert an OCEL 2.0 SQLite file to the oceldb Parquet layout
-convert_ocel("running-example.sqlite", "running-example", overwrite=True)
+ocel = read_sqlite("running-example.sqlite")
 
-ocel = OCEL.read("running-example")
-
-# Event counts by type
 event_counts = (
     ocel.events()
     .group_by("ocel_type")
-    .aggregate(n=col("ocel_id").count())
-    .order_by(desc("n"))
-    .execute()
+    .len()
+    .sort("len", descending=True)
+    .collect()
 )
 
-# Latest state of each order
-latest_states = ocel.object_states("order").latest().execute()
+orders = ocel.objects("order").collect()
 
-# Filter objects using a predicate
-from oceldb.predicates import participated_in
-paid_orders = ocel.objects("order").filter(participated_in(ocel, "Pay Order"))
-print(paid_orders.count().execute())
+latest_order_states = (
+    ocel.object_states("order")
+    .sort("ocel_type", "ocel_id", "ocel_time")
+    .unique(subset=["ocel_type", "ocel_id"], keep="last")
+    .collect()
+)
 ```
 
-## Core concepts
+## Opening Logs
 
-[OCEL 2.0](https://www.ocel-standard.org/) extends flat event logs with
-multiple interrelated object types. An order-fulfilment process, for example,
-involves orders, items, packages, and payments — each with their own lifecycle.
-oceldb stores this structure natively.
-
-### The `OCEL` class
-
-`OCEL.read(path)` opens a persisted Parquet log directory and returns an
-`OCEL` instance backed by lazy `oceldb.Table` expressions.
+Use `OCEL.read(...)` for an existing native oceldb directory:
 
 ```python
-ocel = OCEL.read("my-log")
+from oceldb import OCEL
 
-ocel.events()                   # all events: ocel_id, ocel_type, ocel_time, …attrs
-ocel.events("Place Order")      # filtered to one type
-ocel.events("A", "B")           # filtered to multiple types
-
-ocel.objects()                  # all objects: ocel_id, ocel_type
-ocel.objects("order")           # filtered to one type
-
-ocel.object_changes("order")    # sparse history rows for object type
-ocel.object_states("order")     # fill-forward state view (see below)
-ocel.flatten("order")           # case-centric event log with orders as cases
-
-ocel.event_object               # E2O bridge: event_id, event_type, object_id, object_type, qualifier
-ocel.object_object              # O2O bridge: source_id, source_type, target_id, target_type, qualifier
-
-ocel.manifest                   # parsed manifest.json (counts, types, time range)
+ocel = OCEL.read("converted-log")
 ```
 
-### Object states
+Use `read_sqlite(...)` for an OCEL 2.0 SQLite export. The first call converts
+the SQLite file to a native Parquet directory under the OS cache directory.
+Repeated reads reuse the cache while the source path, file size, and modified
+time stay unchanged.
 
-Attributes in OCEL 2.0 are stored as change rows. `object_states` reconstructs
-point-in-time snapshots via fill-forward:
+```python
+from oceldb import read_sqlite
+
+ocel = read_sqlite("source.sqlite")
+```
+
+Use `convert_sqlite(...)` when you want to persist the converted directory
+yourself:
+
+```python
+from oceldb.io import convert_sqlite
+
+convert_sqlite("source.sqlite", "converted-log", overwrite=True)
+ocel = OCEL.read("converted-log")
+```
+
+## The OCEL API
+
+`OCEL` is a lightweight handle around five lazy frames. It does not own a
+database connection and does not need to be used as a context manager.
+
+```python
+ocel.events()                 # all events
+ocel.events("Place Order")    # selected event types only
+
+ocel.objects()                # all object identities
+ocel.objects("order")         # selected object types only
+
+ocel.object_changes("order")  # sparse object attribute changes
+ocel.object_states("order")   # forward-filled object state history
+
+ocel.event_object()           # event-to-object relations
+ocel.object_object()          # object-to-object relations
+```
+
+When you pass type names to `events(...)`, `object_changes(...)`, or
+`object_states(...)`, oceldb filters the rows and omits attribute columns that
+are entirely null for the selected types. This keeps type-specific queries
+smaller and easier to inspect.
+
+## Manual Construction
+
+You can build an `OCEL` directly from Polars lazy frames. The constructor trusts
+the supplied schema and does not validate dangling relations or sort rows.
 
 ```python
 from datetime import datetime
 
-states = ocel.object_states("order")
-
-states.history()          # all change rows in chronological order
-states.latest()           # most recent state per object
-states.as_of(datetime(2024, 6, 1))  # state at a specific timestamp
-```
-
-### Flattening
-
-Flatten an OCEL to a traditional case-centric event log by choosing one object
-type as the case notion:
-
-```python
-from oceldb import CaseCentricEventLog
-
-flat_orders: CaseCentricEventLog = ocel.flatten("order")
-orders = flat_orders.execute()
-```
-
-The flattened table follows the XES naming convention:
-
-- `case:concept:name`: object id of the selected object type
-- `case:<attribute>`: selected object's state at the event timestamp
-- `concept:name`: event activity, from `ocel_type`
-- `time:timestamp`: event timestamp, from `ocel_time`
-- `ocel_event_id`: original OCEL event id
-- event attributes are preserved as additional columns
-
-Case-centric discovery functions accept `CaseCentricEventLog` values.
-
-### Typed expressions
-
-All accessors return `oceldb.Table` expressions. Use the wrappers exported by
-`oceldb` for expression construction; do not compose queries with Ibis
-objects directly. The wrappers keep the supported expression surface typed
-despite Ibis' dynamic typing internals.
-
-```python
-from oceldb import col, desc, row_number
-
-# Latest object states with a specific attribute value
-heavy = ocel.object_states("Container").latest().filter(
-    col("Weight") > 500
-)
-
-# Event timeline per flattened case with lag/lead
-flat = ocel.flatten("order")
-timeline = flat.mutate(
-    seq=row_number().over(
-        group_by="case:concept:name", order_by=["time:timestamp", "ocel_event_id"]
-    ),
-    previous=col("concept:name").lag().over(
-        group_by="case:concept:name", order_by=["time:timestamp", "ocel_event_id"]
-    ),
-    next=col("concept:name").lead().over(
-        group_by="case:concept:name", order_by=["time:timestamp", "ocel_event_id"]
-    ),
-).order_by("case:concept:name", "time:timestamp").execute()
-
-# Aggregation and ordering
-counts = (
-    ocel.events()
-    .group_by("ocel_type")
-    .aggregate(n=col("ocel_id").count())
-    .order_by(desc("n"))
-    .execute()
-)
-```
-
-The typed surface includes `Table.filter`, `select`, `mutate`, `drop`,
-`rename`, `distinct`, `limit`, `order_by`, `group_by`, `join`, `execute`,
-and `to_pyarrow`; column comparisons and aggregations; and the `col`, `asc`,
-`desc`, `row_number`, and `union` helpers.
-
-## Predicates
-
-`oceldb.predicates` provides free-function predicates for OCEL-specific filter
-expressions. All return deferred boolean expressions for use with
-`oceldb.Table.filter()`.
-
-### Object predicates
-
-```python
-from oceldb.predicates import (
-    participated_in,     # object participated in ≥1 event of a given type
-    cooccurrence_count,  # count of co-occurring objects of a given type
-    e2o_count,           # count of E2O-linked events of a given type
-    o2o_count,           # count of O2O-linked objects of a given type
-    o2o_reachable,       # reachability via O2O relations
-    time_between,        # object has two linked events within time bounds
-)
-
-# Orders that were paid
-paid = ocel.objects("order").filter(participated_in(ocel, "Pay Order"))
-
-# Orders with exactly one Pay Order event
-ocel.objects("order").filter(e2o_count(ocel, "Pay Order", target="event") == 1)
-
-# Orders with more than 3 items co-occurring
-busy = ocel.objects("order").filter(cooccurrence_count(ocel, "item") >= 3)
-
-# Objects with exactly two linked children
-ocel.objects("order").filter(o2o_count(ocel, "item") == 2)
-
-# Objects linked (directly or transitively) to a Transport Document
-ocel.objects("Container").filter(o2o_reachable(ocel, "Transport Document"))
-
-# Visitors where check_ticket happens at least 10 minutes after check_visitor
-from datetime import timedelta
-
-delta = time_between(ocel, "check_visitor", "check_ticket")
-ocel.objects("visitor").filter(
-    timedelta(minutes=10) <= delta,
-)
-
-# Visitors where the two events are between 10 and 30 minutes apart
-ocel.objects("visitor").filter(
-    timedelta(minutes=10) <= delta,
-    delta <= timedelta(minutes=30),
-)
-
-# Equivalent single-predicate form
-ocel.objects("visitor").filter(delta.between(timedelta(minutes=10), timedelta(minutes=30)))
-```
-
-### Event predicates
-
-```python
-from oceldb.predicates import (
-    e2o_count,                 # count of E2O-linked objects of a given type
-    involves,                  # event involves ≥1 object of a given type
-    has_matching_predecessor,  # batch-synchronisation check
-)
-
-# Events that involve at least one item
-ocel.events().filter(involves(ocel, "item"))
-
-# Events with exactly two linked items
-ocel.events().filter(e2o_count(ocel, "item") == 2)
-
-# Sync events that have a matching preceding Group event
-matched = ocel.events("Sync").filter(
-    has_matching_predecessor(ocel, "Group", "member")
-)
-```
-
-### Count predicates
-
-`cooccurrence_count`, `e2o_count`, `o2o_count` return a `CountPredicate`
-object that supports threshold comparisons:
-
-For `e2o_count`, `target="object"` counts objects per event, while
-`target="event"` counts events per object.
-
-```python
-e2o_count(ocel, "Pay Order", target="event") >= 1  # participated at least once
-e2o_count(ocel, "Pay Order", target="event") == 1  # participated exactly once
-e2o_count(ocel, "Pay Order", target="event") == 0  # never participated
-```
-
-## Inspection
-
-`oceldb.inspect` provides structural summaries read directly from the manifest
-(no SQL):
-
-```python
-from oceldb.inspect import overview, event_types, object_types
-
-print(overview(ocel))
-# Events:        35,413  (14 types)
-# Objects:       13,910  (7 types)
-# E2O relations: 74,334
-# O2O relations: 15,953
-# Time range:    2023-05-22 11:54:42  →  2024-08-22 12:18:41
-
-for et in event_types(ocel):      # sorted by count descending
-    print(et.name, et.count, et.attributes)
-
-for ot in object_types(ocel):     # sorted by count descending
-    print(ot.name, ot.object_count, ot.attributes)
-```
-
-## Analysis helpers
-
-`oceldb.analysis` provides standalone convenience functions. They take an
-`OCEL` instance, compose the regular lazy table API internally, and return
-materialized Polars dataframes.
-
-```python
+import polars as pl
 from oceldb import OCEL
-from oceldb.analysis import (
-    activity_counts,
-    case_time_bounds,
-    object_timeline,
-    start_activity_counts,
-)
 
-with OCEL.read("my-log") as ocel:
-    print(activity_counts(ocel))
-    print(start_activity_counts(ocel, "order"))
-    print(case_time_bounds(ocel, "order"))
+events = pl.DataFrame(
+    {
+        "ocel_id": ["e1"],
+        "ocel_time": [datetime(2024, 1, 1)],
+        "ocel_type": ["Place Order"],
+        "amount": [42.0],
+    }
+).lazy()
 
-    timeline = object_timeline(ocel, "order").head(20)
-    print(timeline)
+objects = pl.DataFrame(
+    {"ocel_id": ["o1"], "ocel_type": ["order"]}
+).lazy()
+
+object_changes = pl.DataFrame(
+    {
+        "ocel_id": ["o1"],
+        "ocel_time": [datetime(1970, 1, 1)],
+        "ocel_changed_field": [None],
+        "status": ["created"],
+        "ocel_type": ["order"],
+    }
+).lazy()
+
+e2o = pl.DataFrame(
+    {
+        "ocel_event_id": ["e1"],
+        "ocel_event_type": ["Place Order"],
+        "ocel_object_id": ["o1"],
+        "ocel_object_type": ["order"],
+        "ocel_qualifier": [None],
+    }
+).lazy()
+
+o2o = pl.DataFrame(
+    schema={
+        "ocel_source_id": pl.String,
+        "ocel_source_type": pl.String,
+        "ocel_target_id": pl.String,
+        "ocel_target_type": pl.String,
+        "ocel_qualifier": pl.String,
+    }
+).lazy()
+
+ocel = OCEL(events, objects, object_changes, o2o, e2o)
+ocel.write("manual-log", overwrite=True)
 ```
 
-## Discovery
+## Native Storage Layout
 
-`oceldb.case_centric` provides discovery over flattened case-centric event logs:
-first discover a directly-follows graph, then a process tree, then synthesize a
-Petri net. `oceldb.discovery` provides object-centric discovery directly over
-persisted OCEL tables by applying that case-centric pipeline per selected object
-type, merging transitions with equal activity labels, and marking variable arcs
-where one event can involve multiple objects of the same type.
-
-```python
-from oceldb import OCEL, visualize
-from oceldb.case_centric import (
-    discover_dfg,
-    discover_process_tree,
-    synthesize_petri_net,
-)
-from oceldb.discovery import discover_ocpn
-
-with OCEL.read("my-log") as ocel:
-    dfg = discover_dfg(ocel.flatten("order"))
-    tree = discover_process_tree(dfg)
-    order_net = synthesize_petri_net(tree, object_type="order")
-
-    ocpn = discover_ocpn(ocel, "order", "item")
-    dot = visualize(ocpn)
-    dot.display()  # Inline in Jupyter notebooks
-    dot.render("ocpn", format="svg", cleanup=True)
-
-    print(len(order_net.places), len(ocpn.transitions), len(ocpn.arcs))
-```
-
-In notebooks, `visualize(ocpn)` also displays inline when it is the last
-expression in a cell. The rendered SVG is wrapped in a scrollable, responsive
-HTML container with a download link so larger nets fit notebook output cells
-and can be saved as SVG.
-
-## Import
-
-Convert an OCEL 2.0 SQLite export to the oceldb Parquet layout:
-
-```python
-from oceldb.io import convert_ocel
-
-convert_ocel("source.sqlite", "target/", overwrite=True)
-```
-
-Supported source extensions are `.db`, `.sqlite`, and `.sqlite3`.
-
-## Storage layout
-
-```
+```text
 my-log/
-  manifest.json                           # schema, provenance, totals
   events/
-    ocel_type=<url-encoded-type>/
-      data.parquet                        # ocel_id, ocel_time, …attrs; sorted by ocel_time
+    ocel_type=Place%20Order/
+      data.parquet
   objects/
-    ocel_type=<url-encoded-type>/
-      data.parquet                        # ocel_id
+    ocel_type=order/
+      data.parquet
   object_changes/
-    ocel_type=<url-encoded-type>/
-      data.parquet                        # ocel_id, ocel_time, ocel_changed_field, …attrs
-  event_object.parquet                    # E2O bridge with denormalised type columns
-  object_object.parquet                   # O2O bridge with denormalised type columns (if present)
+    ocel_type=order/
+      data.parquet
+  event_object.parquet
+  object_object.parquet
 ```
 
-Type names with spaces or special characters are URL-encoded in directory names
-(e.g. `ocel_type=Place%20Order`). DuckDB uses Hive partition pruning to skip
-files when filtering by type.
+Type names are URL-encoded in directory names. The `ocel_type` column is
+re-attached when reading, so per-type Parquet files only store ids, timestamps,
+relation fields, and custom attributes.
 
-## Type checking
+## Development
 
-Ibis' expression types are dynamic and produce pervasive errors in strict
-pyright/basedpyright projects. For that reason, Ibis is an implementation
-detail: public query methods return `oceldb.Table`, and supported query
-operations are exposed through the wrappers in `oceldb.expr`.
-
-```python
-from oceldb import OCEL, col, desc
-
-with OCEL.read("my-log") as ocel:
-    result = (
-        ocel.events("Place Order")
-        .filter(col("amount") > 100)
-        .order_by(desc("ocel_time"))
-        .execute()
-    )
+```bash
+uv run ruff check .
+uv run basedpyright
+uv run pytest
 ```
-
-Keep expressions within this typed API. Importing Ibis expressions directly or
-operating on the underlying raw backend bypasses the wrapper layer and brings
-back the typing problems it is intended to isolate.
-
-## License
 
 MIT
