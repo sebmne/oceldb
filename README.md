@@ -24,7 +24,7 @@ Requires Python 3.11+.
 ## Quick Start
 
 ```python
-from oceldb import read_sqlite
+from oceldb.io import read_sqlite
 
 ocel = read_sqlite("running-example.sqlite")
 
@@ -62,7 +62,7 @@ Repeated reads reuse the cache while the source path, file size, and modified
 time stay unchanged.
 
 ```python
-from oceldb import read_sqlite
+from oceldb.io import read_sqlite
 
 ocel = read_sqlite("source.sqlite")
 ```

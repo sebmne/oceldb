@@ -15,19 +15,15 @@ the epoch-row trick puts initial object state at ``1970-01-01``.
 
 import shutil
 import sqlite3
-from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
-from typing import TYPE_CHECKING
 from uuid import uuid4
 
 import duckdb
 
+from oceldb.ocel import OCEL
 from oceldb.store import encode_type_name
-from oceldb.utils.cache import cached_conversion
-
-if TYPE_CHECKING:
-    from oceldb.ocel import OCEL
+from oceldb.utils.cache import conversion_cache_dir
 
 _EPOCH = "TIMESTAMP '1970-01-01 00:00:00'"
 _EVENT_CORE = {"ocel_id", "ocel_time"}
@@ -119,36 +115,38 @@ def convert_sqlite(
     staging.rename(target)
 
 
-def _read_sqlite(source_path: Path, target_dir: Path) -> None:
-    """Convert ``source_path`` into ``target_dir`` for the cache wrapper."""
-    convert_sqlite(source_path, target_dir, overwrite=True)
+def read_sqlite(source: str | Path) -> OCEL:
+    """Open an OCEL 2.0 SQLite export as an :class:`oceldb.OCEL`.
 
+    Args:
+        source: Path to an OCEL 2.0 SQLite database.
 
-_read_sqlite.__name__ = "read_sqlite"
-read_sqlite: Callable[[str | Path], "OCEL"] = cached_conversion(_read_sqlite)
-read_sqlite.__doc__ = """Open an OCEL 2.0 SQLite export as an :class:`oceldb.OCEL`.
+    Returns:
+        An ``OCEL`` backed by a cached native Parquet conversion of ``source``.
 
-Args:
-    source: Path to an OCEL 2.0 SQLite database.
+    Raises:
+        FileNotFoundError: If ``source`` does not exist.
+        duckdb.Error: If DuckDB cannot attach or query the SQLite database.
+        sqlite3.Error: If SQLite schema inspection fails.
 
-Returns:
-    An ``OCEL`` backed by a cached native Parquet conversion of ``source``.
+    Notes:
+        The cache key includes the absolute source path, file size, and
+        modification time. Re-reading an unchanged file reuses the cached
+        conversion; changing the SQLite file creates a new cache entry.
 
-Raises:
-    FileNotFoundError: If ``source`` does not exist.
-    duckdb.Error: If DuckDB cannot attach or query the SQLite database.
-    sqlite3.Error: If SQLite schema inspection fails.
+    Examples:
+        >>> from oceldb.io import read_sqlite
+        >>> ocel = read_sqlite("running-example.sqlite")
+        >>> ocel.events().collect()
+    """
+    source_path = Path(source)
+    if not source_path.exists():
+        raise FileNotFoundError(f"Source file not found: {source_path}")
 
-Notes:
-    The cache key includes the absolute source path, file size, and modification
-    time. Re-reading an unchanged file reuses the cached conversion; changing the
-    SQLite file creates a new cache entry.
-
-Examples:
-    >>> from oceldb import read_sqlite
-    >>> ocel = read_sqlite("running-example.sqlite")
-    >>> ocel.events().collect()
-"""
+    target_dir = conversion_cache_dir(source_path, name="read_sqlite")
+    if not target_dir.exists():
+        convert_sqlite(source_path, target_dir, overwrite=True)
+    return OCEL.read(target_dir)
 
 
 @dataclass(frozen=True)

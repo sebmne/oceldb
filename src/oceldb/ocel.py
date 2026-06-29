@@ -18,14 +18,30 @@ schema:
 """
 
 import html
-from collections.abc import Iterable, Sequence
+from collections.abc import Callable, Iterable, Sequence
+from dataclasses import dataclass
 from pathlib import Path
-from typing import cast
+from typing import TypeVar, cast
+
+_T = TypeVar("_T")
 
 import polars as pl
 
 from oceldb import schema as s
 from oceldb.store import read_frames, write_frames
+
+_TYPE_PREVIEW_LIMIT = 6
+
+
+@dataclass(frozen=True)
+class _Overview:
+    events: int
+    objects: int
+    object_changes: int
+    e2o: int
+    o2o: int
+    event_types: list[str]
+    object_types: list[str]
 
 
 class OCEL:
@@ -162,24 +178,57 @@ class OCEL:
                 object types are returned.
 
         Returns:
-            A lazy frame with one row per object and change timestamp. Attribute
-            values are forward-filled per ``(ocel_type, ocel_id)`` from the most
+            A lazy frame with one row per object and change timestamp:
+            ``ocel_id``, ``ocel_time``, forward-filled object attributes,
+            ``ocel_event_id``, ``ocel_event_type``, and ``ocel_type``. Attribute
+            values are carried forward per ``(ocel_type, ocel_id)`` from the most
             recent non-null value. The result is sorted by ``ocel_type``,
             ``ocel_id``, and ``ocel_time``.
 
         Notes:
-            OCEL stores object attributes as sparse changes. This method turns
-            those changes into a state history that is convenient for temporal
-            analysis, joins, and "latest state" queries.
+            OCEL 2.0 objects change only through events, so each change row is
+            stamped with the event that caused it (the event linked via E2O at
+            the same timestamp): ``ocel_event_id`` / ``ocel_event_type``. The
+            synthetic initial-state row at the epoch has no causing event and
+            leaves both null; when an object is in several events at one instant
+            the smallest ``ocel_event_id`` is chosen. This event-stamped state
+            history is the basis for temporal filters and for flattening.
 
         Examples:
             >>> states = ocel.object_states("order")
+            >>> # the order's attributes at the moment it was paid
+            >>> paid = states.filter(pl.col("ocel_event_type") == "Pay Order")
             >>> latest = (
             ...     states
             ...     .sort("ocel_type", "ocel_id", "ocel_time")
             ...     .unique(subset=["ocel_type", "ocel_id"], keep="last")
             ...     .collect()
             ... )
+        """
+        states, attrs = self._forward_filled_states(types)
+        enriched = states.join(
+            self._causing_events(types),
+            left_on=[s.OCEL_ID, s.OCEL_TIME],
+            right_on=[s.OCEL_OBJECT_ID, s.OCEL_TIME],
+            how="left",
+        )
+        return enriched.select(
+            s.OCEL_ID,
+            s.OCEL_TIME,
+            *attrs,
+            s.OCEL_EVENT_ID,
+            s.OCEL_EVENT_TYPE,
+            s.OCEL_TYPE,
+        ).sort(s.OCEL_TYPE, s.OCEL_ID, s.OCEL_TIME)
+
+    def _forward_filled_states(
+        self, types: tuple[str, ...]
+    ) -> tuple[pl.LazyFrame, list[str]]:
+        """Per-object state history with attributes carried forward.
+
+        Returns the forward-filled state frame (``ocel_type``, ``ocel_id``,
+        ``ocel_time``, attributes — one row per object and change timestamp) and
+        the list of attribute columns kept for *types*.
         """
         frame = self._object_changes
         core = (s.OCEL_ID, s.OCEL_TIME, s.OCEL_CHANGED_FIELD)
@@ -189,27 +238,45 @@ class OCEL:
             attrs = _present(frame, candidates)
         else:
             attrs = candidates
-
         keys = [s.OCEL_TYPE, s.OCEL_ID, s.OCEL_TIME]
         if not attrs:
-            return (
-                frame.select(keys)
-                .unique()
-                .select(s.OCEL_ID, s.OCEL_TIME, s.OCEL_TYPE)
-                .sort(s.OCEL_TYPE, s.OCEL_ID, s.OCEL_TIME)
-            )
-
+            return frame.select(keys).unique(), attrs
         collapsed = frame.group_by(keys).agg(
             pl.col(attr).drop_nulls().last().alias(attr) for attr in attrs
         )
-        filled = collapsed.with_columns(
+        states = collapsed.with_columns(
             pl.col(attr)
             .forward_fill()
             .over([s.OCEL_TYPE, s.OCEL_ID], order_by=s.OCEL_TIME)
             for attr in attrs
         )
-        return filled.select(s.OCEL_ID, s.OCEL_TIME, *attrs, s.OCEL_TYPE).sort(
-            s.OCEL_TYPE, s.OCEL_ID, s.OCEL_TIME
+        return states, attrs
+
+    def _causing_events(self, types: tuple[str, ...]) -> pl.LazyFrame:
+        """Map each ``(object, timestamp)`` to the event that changed it there.
+
+        OCEL 2.0 objects change only through events, so a change at time ``T``
+        for object ``O`` corresponds to the event linked to ``O`` via E2O whose
+        timestamp is ``T``. If several events share that instant, the smallest
+        ``ocel_event_id`` is kept so the result is deterministic.
+        """
+        e2o = self._e2o
+        if types:
+            e2o = e2o.filter(pl.col(s.OCEL_OBJECT_TYPE).is_in(list(types)))
+        return (
+            e2o.select(s.OCEL_OBJECT_ID, s.OCEL_EVENT_ID, s.OCEL_EVENT_TYPE)
+            .join(
+                self._events.select(s.OCEL_ID, s.OCEL_TIME),
+                left_on=s.OCEL_EVENT_ID,
+                right_on=s.OCEL_ID,
+                how="inner",
+            )
+            .sort(s.OCEL_EVENT_ID)
+            .unique(
+                subset=[s.OCEL_OBJECT_ID, s.OCEL_TIME],
+                keep="first",
+                maintain_order=True,
+            )
         )
 
     def event_object(self) -> pl.LazyFrame:
@@ -236,43 +303,54 @@ class OCEL:
         """
         return self._o2o
 
+    def __rshift__(self, step: Callable[["OCEL"], _T]) -> _T:
+        """Apply a step, enabling ``ocel >> step(...)`` pipeline syntax."""
+        return step(self)
+
     def __repr__(self) -> str:
-        events, objects, e2o, o2o, event_types, object_types = self._overview()
+        overview = self._overview()
         return (
-            f"OCEL(events={events:,}, objects={objects:,}, "
-            f"e2o={e2o:,}, o2o={o2o:,}, "
-            f"event_types={len(event_types)}, object_types={len(object_types)})"
+            "OCEL\n"
+            f"  events:         {_rows(overview.events)} | "
+            f"{_types(overview.event_types)}\n"
+            f"  objects:        {_rows(overview.objects)} | "
+            f"{_types(overview.object_types)}\n"
+            f"  object changes: {_rows(overview.object_changes)}\n"
+            f"  relations:      E2O: {_rows(overview.e2o)} | "
+            f"O2O: {_rows(overview.o2o)}"
         )
 
     def _repr_html_(self) -> str:
-        events, objects, e2o, o2o, event_types, object_types = self._overview()
+        overview = self._overview()
         counts = "".join(
             f"<tr><th style='text-align:left'>{label}</th>"
             f"<td style='text-align:right'>{value:,}</td></tr>"
             for label, value in (
-                ("Events", events),
-                ("Objects", objects),
-                ("E2O relations", e2o),
-                ("O2O relations", o2o),
+                ("Events", overview.events),
+                ("Objects", overview.objects),
+                ("Object changes", overview.object_changes),
+                ("E2O relations", overview.e2o),
+                ("O2O relations", overview.o2o),
             )
         )
         return (
             "<div style='font-family:sans-serif'>"
             "<strong>OCEL</strong>"
             f"<table>{counts}</table>"
-            f"<div><em>Event types:</em> {_chips(event_types)}</div>"
-            f"<div><em>Object types:</em> {_chips(object_types)}</div>"
+            f"<div><em>Event types:</em> {_chips(overview.event_types)}</div>"
+            f"<div><em>Object types:</em> {_chips(overview.object_types)}</div>"
             "</div>"
         )
 
-    def _overview(self) -> tuple[int, int, int, int, list[str], list[str]]:
-        return (
-            _count(self._events),
-            _count(self._objects),
-            _count(self._e2o),
-            _count(self._o2o),
-            _distinct_types(self._events),
-            _distinct_types(self._objects),
+    def _overview(self) -> _Overview:
+        return _Overview(
+            events=_count(self._events),
+            objects=_count(self._objects),
+            object_changes=_count(self._object_changes),
+            e2o=_count(self._e2o),
+            o2o=_count(self._o2o),
+            event_types=_distinct_types(self._events),
+            object_types=_distinct_types(self._objects),
         )
 
     @classmethod
@@ -290,8 +368,9 @@ class OCEL:
 
         Notes:
             This method reads oceldb's native directory layout. To open an OCEL
-            2.0 SQLite export directly, use ``oceldb.read_sqlite("log.sqlite")``
-            or convert it first with ``oceldb.io.convert_sqlite``.
+            2.0 SQLite export directly, use
+            ``oceldb.io.read_sqlite("log.sqlite")`` or convert it first with
+            ``oceldb.io.convert_sqlite``.
 
         Examples:
             >>> ocel = OCEL.read("converted-log")
@@ -337,6 +416,50 @@ class OCEL:
             overwrite=overwrite,
         )
 
+    def sql(self, query: str) -> pl.DataFrame:
+        """Run a DuckDB SQL query over the log's tables.
+
+        Opens a temporary in-memory DuckDB connection, registers the five
+        logical tables as views, runs *query*, and returns the result as a
+        Polars ``DataFrame``. The connection is closed before returning, so it is
+        a self-contained query rather than a long-lived session.
+
+        The registered views are the raw tables: ``events``, ``objects``,
+        ``object_changes``, ``event_object`` (E2O) and ``object_object`` (O2O).
+        DuckDB scans the underlying (parquet-backed) Polars frames directly;
+        only the tables the query references are materialized.
+
+        Args:
+            query: A DuckDB SQL statement referencing the registered views.
+
+        Returns:
+            The query result as an eager ``pl.DataFrame``.
+
+        Examples:
+            >>> ocel.sql(
+            ...     "SELECT ocel_type, count(*) AS n "
+            ...     "FROM events GROUP BY 1 ORDER BY n DESC"
+            ... )
+            >>> ocel.sql('''
+            ...     SELECT e.ocel_type, eo.ocel_object_type, count(*) AS n
+            ...     FROM events e
+            ...     JOIN event_object eo ON eo.ocel_event_id = e.ocel_id
+            ...     GROUP BY 1, 2
+            ... ''')
+        """
+        import duckdb
+
+        connection = duckdb.connect()
+        try:
+            connection.register("events", self._events)
+            connection.register("objects", self._objects)
+            connection.register("object_changes", self._object_changes)
+            connection.register("event_object", self._e2o)
+            connection.register("object_object", self._o2o)
+            return connection.sql(query).pl()
+        finally:
+            connection.close()
+
 
 def _select_types(
     frame: pl.LazyFrame, types: Sequence[str], core: tuple[str, ...]
@@ -379,6 +502,26 @@ def _distinct_types(frame: pl.LazyFrame) -> list[str]:
         .to_list()
     )
     return [str(value) for value in values]
+
+
+def _rows(count: int) -> str:
+    return f"{count:,} row" if count == 1 else f"{count:,} rows"
+
+
+def _types(values: list[str]) -> str:
+    count = len(values)
+    label = "type" if count == 1 else "types"
+    return f"{count} {label} {_preview(values)}"
+
+
+def _preview(values: Sequence[str]) -> str:
+    if not values:
+        return "[]"
+    visible = [repr(value) for value in values[:_TYPE_PREVIEW_LIMIT]]
+    remaining = len(values) - len(visible)
+    if remaining:
+        visible.append(f"... +{remaining} more")
+    return "[" + ", ".join(visible) + "]"
 
 
 def _chips(values: list[str]) -> str:
