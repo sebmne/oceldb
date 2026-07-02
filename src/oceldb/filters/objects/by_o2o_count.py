@@ -6,7 +6,7 @@ from typing import Literal, overload
 import polars as pl
 
 from oceldb import schema as s
-from oceldb.filters._step import _step
+from oceldb.utils._step import _step
 from oceldb.filters._utils import _to_list
 from oceldb.ocel import OCEL
 
@@ -59,23 +59,45 @@ def filter_objects_by_o2o_count(
     """
     o2o = ocel.object_object()
 
-    out_counts = pl.LazyFrame({s.OCEL_ID: pl.Series([], dtype=pl.String), "_count": pl.Series([], dtype=pl.UInt32)})
-    in_counts = pl.LazyFrame({s.OCEL_ID: pl.Series([], dtype=pl.String), "_count": pl.Series([], dtype=pl.UInt32)})
+    out_counts = pl.LazyFrame(
+        {
+            s.OCEL_ID: pl.Series([], dtype=pl.String),
+            "_count": pl.Series([], dtype=pl.UInt32),
+        }
+    )
+    in_counts = pl.LazyFrame(
+        {
+            s.OCEL_ID: pl.Series([], dtype=pl.String),
+            "_count": pl.Series([], dtype=pl.UInt32),
+        }
+    )
 
     if direction in ("out", "both"):
         src = o2o
         if related_types is not None:
             src = src.filter(pl.col(s.OCEL_TARGET_TYPE).is_in(_to_list(related_types)))
-        out_counts = src.group_by(s.OCEL_SOURCE_ID).agg(pl.len().alias("_count")).rename({s.OCEL_SOURCE_ID: s.OCEL_ID})
+        out_counts = (
+            src.group_by(s.OCEL_SOURCE_ID)
+            .agg(pl.len().alias("_count"))
+            .rename({s.OCEL_SOURCE_ID: s.OCEL_ID})
+        )
 
     if direction in ("in", "both"):
         tgt = o2o
         if related_types is not None:
             tgt = tgt.filter(pl.col(s.OCEL_SOURCE_TYPE).is_in(_to_list(related_types)))
-        in_counts = tgt.group_by(s.OCEL_TARGET_ID).agg(pl.len().alias("_count")).rename({s.OCEL_TARGET_ID: s.OCEL_ID})
+        in_counts = (
+            tgt.group_by(s.OCEL_TARGET_ID)
+            .agg(pl.len().alias("_count"))
+            .rename({s.OCEL_TARGET_ID: s.OCEL_ID})
+        )
 
     if direction == "both":
-        combined = pl.concat([out_counts, in_counts]).group_by(s.OCEL_ID).agg(pl.col("_count").sum())
+        combined = (
+            pl.concat([out_counts, in_counts])
+            .group_by(s.OCEL_ID)
+            .agg(pl.col("_count").sum())
+        )
     elif direction == "out":
         combined = out_counts
     else:
@@ -106,7 +128,17 @@ def filter_objects_by_o2o_count(
             kept_objects, left_on=s.OCEL_ID, right_on=s.OCEL_OBJECT_ID, how="semi"
         ),
         o2o=ocel.object_object()
-        .join(kept_objects, left_on=s.OCEL_SOURCE_ID, right_on=s.OCEL_OBJECT_ID, how="semi")
-        .join(kept_objects, left_on=s.OCEL_TARGET_ID, right_on=s.OCEL_OBJECT_ID, how="semi"),
+        .join(
+            kept_objects,
+            left_on=s.OCEL_SOURCE_ID,
+            right_on=s.OCEL_OBJECT_ID,
+            how="semi",
+        )
+        .join(
+            kept_objects,
+            left_on=s.OCEL_TARGET_ID,
+            right_on=s.OCEL_OBJECT_ID,
+            how="semi",
+        ),
         e2o=relations,
     )

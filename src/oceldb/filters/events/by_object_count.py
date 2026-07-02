@@ -6,7 +6,7 @@ from typing import overload
 import polars as pl
 
 from oceldb import schema as s
-from oceldb.filters._step import _step
+from oceldb.utils._step import _step
 from oceldb.filters._utils import _to_list
 from oceldb.ocel import OCEL
 
@@ -82,7 +82,17 @@ def filter_events_by_object_count(
             kept_objects, left_on=s.OCEL_ID, right_on=s.OCEL_OBJECT_ID, how="semi"
         ),
         o2o=ocel.object_object()
-        .join(kept_objects, left_on=s.OCEL_SOURCE_ID, right_on=s.OCEL_OBJECT_ID, how="semi")
-        .join(kept_objects, left_on=s.OCEL_TARGET_ID, right_on=s.OCEL_OBJECT_ID, how="semi"),
+        .join(
+            kept_objects,
+            left_on=s.OCEL_SOURCE_ID,
+            right_on=s.OCEL_OBJECT_ID,
+            how="semi",
+        )
+        .join(
+            kept_objects,
+            left_on=s.OCEL_TARGET_ID,
+            right_on=s.OCEL_OBJECT_ID,
+            how="semi",
+        ),
         e2o=relations,
     )

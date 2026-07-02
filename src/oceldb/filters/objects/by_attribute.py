@@ -6,7 +6,7 @@ from typing import Literal, overload
 import polars as pl
 
 from oceldb import schema as s
-from oceldb.filters._step import _step
+from oceldb.utils._step import _step
 from oceldb.filters._utils import _to_list
 from oceldb.ocel import OCEL
 
@@ -65,7 +65,11 @@ def filter_objects_by_attribute(
         >>> sub = filter_objects_by_attribute(ocel, pl.col("price") > 100, object_types="order", when="always")
         >>> sub = ocel >> filter_objects_by_attribute(pl.col("price") > 100, when="2023-06-01")
     """
-    states = ocel.object_states() if object_types is None else ocel.object_states(*_to_list(object_types))
+    states = (
+        ocel.object_states()
+        if object_types is None
+        else ocel.object_states(*_to_list(object_types))
+    )
 
     if when == "sometimes":
         satisfying = states.filter(predicate).select(s.OCEL_ID).unique()
@@ -73,14 +77,15 @@ def filter_objects_by_attribute(
         all_ids = (
             ocel.objects().select(s.OCEL_ID)
             if object_types is None
-            else ocel.objects().filter(pl.col(s.OCEL_TYPE).is_in(_to_list(object_types))).select(s.OCEL_ID)
+            else ocel.objects()
+            .filter(pl.col(s.OCEL_TYPE).is_in(_to_list(object_types)))
+            .select(s.OCEL_ID)
         )
         failing = states.filter(~predicate).select(s.OCEL_ID).unique()
         satisfying = all_ids.join(failing, on=s.OCEL_ID, how="anti")
     else:
         satisfying = (
-            states
-            .filter(pl.col(s.OCEL_TIME) <= when)
+            states.filter(pl.col(s.OCEL_TIME) <= when)
             .unique(subset=[s.OCEL_ID], keep="last", maintain_order=True)
             .filter(predicate)
             .select(s.OCEL_ID)
@@ -89,10 +94,14 @@ def filter_objects_by_attribute(
     satisfying_ids = satisfying.rename({s.OCEL_ID: s.OCEL_OBJECT_ID})
 
     if object_types is None:
-        relations = ocel.event_object().join(satisfying_ids, on=s.OCEL_OBJECT_ID, how="semi")
+        relations = ocel.event_object().join(
+            satisfying_ids, on=s.OCEL_OBJECT_ID, how="semi"
+        )
     else:
         types = _to_list(object_types)
-        non_target = ocel.event_object().filter(~pl.col(s.OCEL_OBJECT_TYPE).is_in(types))
+        non_target = ocel.event_object().filter(
+            ~pl.col(s.OCEL_OBJECT_TYPE).is_in(types)
+        )
         target = (
             ocel.event_object()
             .filter(pl.col(s.OCEL_OBJECT_TYPE).is_in(types))
@@ -113,7 +122,17 @@ def filter_objects_by_attribute(
             kept_objects, left_on=s.OCEL_ID, right_on=s.OCEL_OBJECT_ID, how="semi"
         ),
         o2o=ocel.object_object()
-        .join(kept_objects, left_on=s.OCEL_SOURCE_ID, right_on=s.OCEL_OBJECT_ID, how="semi")
-        .join(kept_objects, left_on=s.OCEL_TARGET_ID, right_on=s.OCEL_OBJECT_ID, how="semi"),
+        .join(
+            kept_objects,
+            left_on=s.OCEL_SOURCE_ID,
+            right_on=s.OCEL_OBJECT_ID,
+            how="semi",
+        )
+        .join(
+            kept_objects,
+            left_on=s.OCEL_TARGET_ID,
+            right_on=s.OCEL_OBJECT_ID,
+            how="semi",
+        ),
         e2o=relations,
     )

@@ -6,17 +6,21 @@ from typing import Literal, overload
 import polars as pl
 
 from oceldb import schema as s
-from oceldb.filters._step import _step
+from oceldb.utils._step import _step
 from oceldb.filters._utils import _filter_objects_direct
 from oceldb.ocel import OCEL
 
 
 @overload
-def filter_object_types(ocel: OCEL, *types: str, mode: Literal["include", "exclude"] = ...) -> OCEL: ...
+def filter_object_types(
+    ocel: OCEL, *types: str, mode: Literal["include", "exclude"] = ...
+) -> OCEL: ...
 
 
 @overload
-def filter_object_types(*types: str, mode: Literal["include", "exclude"] = ...) -> Callable[[OCEL], OCEL]: ...
+def filter_object_types(
+    *types: str, mode: Literal["include", "exclude"] = ...
+) -> Callable[[OCEL], OCEL]: ...
 
 
 @_step

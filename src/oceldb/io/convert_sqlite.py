@@ -20,10 +20,7 @@ from pathlib import Path
 from uuid import uuid4
 
 import duckdb
-
-from oceldb.ocel import OCEL
 from oceldb.store import encode_type_name
-from oceldb.utils.cache import conversion_cache_dir
 
 _EPOCH = "TIMESTAMP '1970-01-01 00:00:00'"
 _EVENT_CORE = {"ocel_id", "ocel_time"}
@@ -113,40 +110,6 @@ def convert_sqlite(
     elif target.exists():
         target.unlink()
     staging.rename(target)
-
-
-def read_sqlite(source: str | Path) -> OCEL:
-    """Open an OCEL 2.0 SQLite export as an :class:`oceldb.OCEL`.
-
-    Args:
-        source: Path to an OCEL 2.0 SQLite database.
-
-    Returns:
-        An ``OCEL`` backed by a cached native Parquet conversion of ``source``.
-
-    Raises:
-        FileNotFoundError: If ``source`` does not exist.
-        duckdb.Error: If DuckDB cannot attach or query the SQLite database.
-        sqlite3.Error: If SQLite schema inspection fails.
-
-    Notes:
-        The cache key includes the absolute source path, file size, and
-        modification time. Re-reading an unchanged file reuses the cached
-        conversion; changing the SQLite file creates a new cache entry.
-
-    Examples:
-        >>> from oceldb.io import read_sqlite
-        >>> ocel = read_sqlite("running-example.sqlite")
-        >>> ocel.events().collect()
-    """
-    source_path = Path(source)
-    if not source_path.exists():
-        raise FileNotFoundError(f"Source file not found: {source_path}")
-
-    target_dir = conversion_cache_dir(source_path, name="read_sqlite")
-    if not target_dir.exists():
-        convert_sqlite(source_path, target_dir, overwrite=True)
-    return OCEL.read(target_dir)
 
 
 @dataclass(frozen=True)

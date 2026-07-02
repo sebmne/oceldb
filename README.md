@@ -101,6 +101,90 @@ When you pass type names to `events(...)`, `object_changes(...)`, or
 are entirely null for the selected types. This keeps type-specific queries
 smaller and easier to inspect.
 
+## Filtering and Pipelines
+
+Filtering operations live in `oceldb.filters`. They take an `OCEL`, return a
+new `OCEL`, and prune the connected core of the log: removed events, removed
+objects, and relations pointing to removed rows are dropped together.
+
+Every filter supports two equivalent call styles:
+
+```python
+from oceldb.filters import filter_object_types, filter_time
+
+branches_and_users = filter_object_types(ocel, "branches", "users")
+
+recent_branches_and_users = (
+    ocel
+    >> filter_object_types("branches", "users")
+    >> filter_time(start="2024-01-01", end="2024-06-30")
+)
+```
+
+The preferred usage is `>>` as it easily allows for extending a single filter
+to a filter pipeline.
+
+Event filters:
+
+```python
+import polars as pl
+from oceldb.filters import (
+    filter_event_ids,
+    filter_event_types,
+    filter_events_by_attribute,
+    filter_events_by_object_count,
+    filter_time,
+)
+
+paid = ocel >> filter_event_types("Pay Order")
+without_cancellations = ocel >> filter_event_types("Cancel Order", mode="exclude")
+selected_events = ocel >> filter_event_ids("e-001", "e-042")
+large_payments = ocel >> filter_events_by_attribute(
+    pl.col("amount") >= 1000,
+    event_types="Pay Order",
+)
+multi_object_events = ocel >> filter_events_by_object_count(
+    min_count=2,
+    object_types="item",
+)
+first_quarter = ocel >> filter_time(start="2024-01-01", end="2024-03-31")
+```
+
+Object filters:
+
+```python
+import polars as pl
+from oceldb.filters import (
+    filter_object_ids,
+    filter_object_types,
+    filter_objects_by_attribute,
+    filter_objects_by_event_count,
+    filter_objects_by_o2o_count,
+)
+
+orders_and_items = ocel >> filter_object_types("order", "item")
+without_test_objects = ocel >> filter_object_ids("test-order-1", mode="exclude")
+expensive_orders = ocel >> filter_objects_by_attribute(
+    pl.col("price") > 100,
+    object_types="order",
+    when="sometimes",
+)
+frequent_objects = ocel >> filter_objects_by_event_count(
+    min_count=3,
+    event_types="Pay Order",
+)
+bundled_orders = ocel >> filter_objects_by_o2o_count(
+    min_count=1,
+    related_types="item",
+    direction="out",
+)
+```
+
+`filter_objects_by_attribute(..., when=...)` evaluates predicates on
+`object_states()`. Use `"sometimes"` for at least one matching state,
+`"always"` for every recorded state, or a timestamp string for the last known
+state at or before that time.
+
 ## Manual Construction
 
 You can build an `OCEL` directly from Polars lazy frames. The constructor trusts

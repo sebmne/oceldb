@@ -6,7 +6,7 @@ from typing import overload
 import polars as pl
 
 from oceldb import schema as s
-from oceldb.filters._step import _step
+from oceldb.utils._step import _step
 from oceldb.ocel import OCEL
 
 _FIXED = {s.OCEL_ID, s.OCEL_TIME, s.OCEL_EVENT_ID, s.OCEL_EVENT_TYPE, s.OCEL_TYPE}
@@ -63,6 +63,7 @@ def flatten(ocel: OCEL, object_type: str) -> pl.LazyFrame:
             s.OCEL_EVENT_ID,
             pl.col(s.OCEL_EVENT_TYPE).alias("concept:name"),
         )
+        .unique(subset=["case:concept:name", s.OCEL_EVENT_ID])
         .join(
             ocel.events().select(
                 pl.col(s.OCEL_ID).alias(s.OCEL_EVENT_ID),

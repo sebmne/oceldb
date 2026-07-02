@@ -22,13 +22,13 @@ from collections.abc import Callable, Iterable, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from typing import TypeVar, cast
-
-_T = TypeVar("_T")
-
 import polars as pl
 
 from oceldb import schema as s
 from oceldb.store import read_frames, write_frames
+
+_T = TypeVar("_T")
+
 
 _TYPE_PREVIEW_LIMIT = 6
 

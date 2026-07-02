@@ -6,7 +6,7 @@ from typing import overload
 import polars as pl
 
 from oceldb import schema as s
-from oceldb.filters._step import _step
+from oceldb.utils._step import _step
 from oceldb.ocel import OCEL
 
 
