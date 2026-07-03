@@ -467,12 +467,8 @@ class OCEL:
         if not ocels:
             raise ValueError("merge requires at least one OCEL.")
         return cls(
-            events=_concat_unique(
-                [o._events for o in ocels], subset=[s.OCEL_ID]
-            ),
-            objects=_concat_unique(
-                [o._objects for o in ocels], subset=[s.OCEL_ID]
-            ),
+            events=_concat_unique([o._events for o in ocels], subset=[s.OCEL_ID]),
+            objects=_concat_unique([o._objects for o in ocels], subset=[s.OCEL_ID]),
             object_changes=_concat_unique(
                 [o._object_changes for o in ocels], subset=None
             ),

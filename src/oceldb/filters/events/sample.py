@@ -58,8 +58,6 @@ def sample_events(
         >>> sub = sample_events(ocel, 1000, seed=0)
         >>> sub = ocel >> sample_events(fraction=0.1)
     """
-    ids = (
-        ocel.events().select(s.OCEL_ID).collect().get_column(s.OCEL_ID).drop_nulls()
-    )
+    ids = ocel.events().select(s.OCEL_ID).collect().get_column(s.OCEL_ID).drop_nulls()
     keep = _sample_ids(ids, n=n, fraction=fraction, seed=seed)
     return filter_events_by_id(ocel, *keep)

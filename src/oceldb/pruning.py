@@ -43,9 +43,7 @@ def prune_log(
     return OCEL(
         events=events,
         objects=objects,
-        object_changes=ocel.object_changes().join(
-            kept_ids, on=s.OCEL_ID, how="semi"
-        ),
+        object_changes=ocel.object_changes().join(kept_ids, on=s.OCEL_ID, how="semi"),
         o2o=ocel.object_object()
         .join(
             kept_object_ids,

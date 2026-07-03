@@ -58,8 +58,6 @@ def sample_objects(
         >>> sub = sample_objects(ocel, 500, seed=0)
         >>> sub = ocel >> sample_objects(fraction=0.25)
     """
-    ids = (
-        ocel.objects().select(s.OCEL_ID).collect().get_column(s.OCEL_ID).drop_nulls()
-    )
+    ids = ocel.objects().select(s.OCEL_ID).collect().get_column(s.OCEL_ID).drop_nulls()
     keep = _sample_ids(ids, n=n, fraction=fraction, seed=seed)
     return filter_objects_by_id(ocel, *keep)

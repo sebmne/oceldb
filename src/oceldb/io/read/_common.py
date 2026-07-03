@@ -41,9 +41,7 @@ O2O_SCHEMA: dict[str, pl.DataType] = {
 
 
 def empty_lf(schema: dict[str, pl.DataType]) -> pl.LazyFrame:
-    return pl.DataFrame(
-        {k: pl.Series([], dtype=v) for k, v in schema.items()}
-    ).lazy()
+    return pl.DataFrame({k: pl.Series([], dtype=v) for k, v in schema.items()}).lazy()
 
 
 def rows_to_lf(rows: list[dict[str, Any]]) -> pl.LazyFrame:

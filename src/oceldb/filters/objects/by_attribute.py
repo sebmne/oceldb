@@ -97,15 +97,11 @@ def filter_objects_by_attribute(
     if mode == "include":
         kept = matching
     else:
-        kept = scoped_objects.select(s.OCEL_ID).join(
-            matching, on=s.OCEL_ID, how="anti"
-        )
+        kept = scoped_objects.select(s.OCEL_ID).join(matching, on=s.OCEL_ID, how="anti")
     kept_ids = kept.rename({s.OCEL_ID: s.OCEL_OBJECT_ID})
 
     if scope is None:
-        relations = ocel.event_object().join(
-            kept_ids, on=s.OCEL_OBJECT_ID, how="semi"
-        )
+        relations = ocel.event_object().join(kept_ids, on=s.OCEL_OBJECT_ID, how="semi")
     else:
         non_target = ocel.event_object().filter(
             ~pl.col(s.OCEL_OBJECT_TYPE).is_in(scope)

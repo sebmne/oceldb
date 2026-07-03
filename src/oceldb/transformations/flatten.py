@@ -131,10 +131,14 @@ def flatten(ocel: OCEL, object_type: str) -> pl.LazyFrame:
         )
 
     if static_attrs:
-        case_values = states.group_by(s.OCEL_ID).agg(
-            pl.col(attr).drop_nulls().first().alias(f"case:{attr}")
-            for attr in static_attrs
-        ).rename({s.OCEL_ID: "case:concept:name"})
+        case_values = (
+            states.group_by(s.OCEL_ID)
+            .agg(
+                pl.col(attr).drop_nulls().first().alias(f"case:{attr}")
+                for attr in static_attrs
+            )
+            .rename({s.OCEL_ID: "case:concept:name"})
+        )
         result = result.join(case_values, on="case:concept:name", how="left")
 
     return result.select(

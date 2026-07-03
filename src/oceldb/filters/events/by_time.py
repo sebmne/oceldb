@@ -69,9 +69,7 @@ def filter_events_by_time(
         pred = pred & (pl.col(s.OCEL_TIME) >= _bound(start))
     if end is not None:
         pred = pred & (pl.col(s.OCEL_TIME) <= _bound(end))
-    return filter_events_by_attribute(
-        ocel, pred, event_types=event_types, mode=mode
-    )
+    return filter_events_by_attribute(ocel, pred, event_types=event_types, mode=mode)
 
 
 def _bound(value: pl.Series | str) -> pl.Expr | pl.Series:

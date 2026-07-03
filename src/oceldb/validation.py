@@ -79,9 +79,7 @@ def validate(ocel: OCEL) -> ValidationReport:
         duplicate_event_ids=_duplicate_count(events, s.OCEL_ID),
         duplicate_object_ids=_duplicate_count(objects, s.OCEL_ID),
         events_missing_time=_count(events.filter(pl.col(s.OCEL_TIME).is_null())),
-        dangling_e2o_events=_dangling(
-            ocel.event_object(), s.OCEL_EVENT_ID, event_ids
-        ),
+        dangling_e2o_events=_dangling(ocel.event_object(), s.OCEL_EVENT_ID, event_ids),
         dangling_e2o_objects=_dangling(
             ocel.event_object(), s.OCEL_OBJECT_ID, object_ids
         ),
@@ -91,9 +89,7 @@ def validate(ocel: OCEL) -> ValidationReport:
         dangling_o2o_targets=_dangling(
             ocel.object_object(), s.OCEL_TARGET_ID, object_ids
         ),
-        orphan_object_changes=_dangling(
-            ocel.object_changes(), s.OCEL_ID, object_ids
-        ),
+        orphan_object_changes=_dangling(ocel.object_changes(), s.OCEL_ID, object_ids),
     )
 
 

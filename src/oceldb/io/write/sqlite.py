@@ -96,13 +96,13 @@ def _write_events(con: sqlite3.Connection, events: pl.DataFrame) -> None:
 
         type_df = events.filter(pl.col(s.OCEL_TYPE) == et)
         attr_cols = [
-            c for c in type_df.columns
+            c
+            for c in type_df.columns
             if c not in _EVENT_FIXED and type_df[c].is_not_null().any()
         ]
-        col_defs = (
-            ["ocel_id TEXT", "ocel_time TEXT"]
-            + [f'"{c}" {_sql_type(type_df[c].dtype)}' for c in attr_cols]
-        )
+        col_defs = ["ocel_id TEXT", "ocel_time TEXT"] + [
+            f'"{c}" {_sql_type(type_df[c].dtype)}' for c in attr_cols
+        ]
         con.execute(f'CREATE TABLE "event_{suffix}" ({", ".join(col_defs)})')
         con.executemany(
             f'INSERT INTO "event_{suffix}" VALUES ({_placeholders(2 + len(attr_cols))})',
@@ -129,13 +129,13 @@ def _write_objects(
 
         type_oc = oc.filter(pl.col(s.OCEL_TYPE) == ot)
         attr_cols = [
-            c for c in type_oc.columns
+            c
+            for c in type_oc.columns
             if c not in _OC_FIXED and type_oc[c].is_not_null().any()
         ]
-        col_defs = (
-            ["ocel_id TEXT", "ocel_time TEXT", "ocel_changed_field TEXT"]
-            + [f'"{c}" {_sql_type(type_oc[c].dtype)}' for c in attr_cols]
-        )
+        col_defs = ["ocel_id TEXT", "ocel_time TEXT", "ocel_changed_field TEXT"] + [
+            f'"{c}" {_sql_type(type_oc[c].dtype)}' for c in attr_cols
+        ]
         con.execute(f'CREATE TABLE "object_{suffix}" ({", ".join(col_defs)})')
         if len(type_oc) > 0:
             con.executemany(
