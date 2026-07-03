@@ -2,22 +2,19 @@
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Any
+from typing import Any
 
 import polars as pl
 
 from oceldb import schema as s
 from oceldb.io.read._common import (
-    E2O_SCHEMA,
     O2O_SCHEMA,
-    OC_SCHEMA,
+    OBJECT_CHANGES_SCHEMA,
     empty_lf,
+    parse_timestamps,
     rows_to_lf,
 )
 from oceldb.ocel import OCEL
-
-if TYPE_CHECKING:
-    pass
 
 # pm4py column name constants
 _EID = "ocel:eid"
@@ -28,29 +25,28 @@ _OID2 = "ocel:oid_2"
 _OTYPE = "ocel:type"
 _QUALIFIER = "ocel:qualifier"
 
-_EVENT_CORE = {_EID, _ACTIVITY, _TIMESTAMP}
 _OBJECT_CORE = {_OID, _OTYPE}
-_RELATION_CORE = {_EID, _ACTIVITY, _TIMESTAMP, _OID, _OTYPE, _QUALIFIER}
-
-_EPOCH = "1970-01-01 00:00:00+00:00"
 
 
 def read_pm4py(pm4py_ocel: Any) -> OCEL:
-    """Convert a pm4py ``OCEL`` object to an oceldb :class:`~oceldb.OCEL`.
+    """Convert a pm4py OCEL 2.0 ``OCEL`` object to an oceldb :class:`~oceldb.OCEL`.
 
-    Handles both OCEL 1.0 (static object attributes stored as columns on the
-    objects DataFrame) and OCEL 2.0 (time-stamped ``object_changes``
-    attribute). Static attributes are converted to epoch-timestamped change
-    rows so downstream oceldb operations work uniformly.
+    Only OCEL 2.0 logs are supported. Object attribute histories are read from
+    pm4py's time-stamped ``object_changes`` table. OCEL 1.0 inputs — which carry
+    static object attributes as columns on the objects DataFrame — are rejected;
+    convert them to OCEL 2.0 in pm4py first.
 
     Args:
-        pm4py_ocel: A ``pm4py.objects.ocel.obj.OCEL`` instance.
+        pm4py_ocel: A ``pm4py.objects.ocel.obj.OCEL`` instance holding an
+            OCEL 2.0 log.
 
     Returns:
         An ``OCEL`` backed by in-memory Polars lazy frames.
 
     Raises:
         ImportError: If ``pandas`` is not installed.
+        ValueError: If ``pm4py_ocel`` is an OCEL 1.0 log (static object
+            attributes stored as columns on the objects DataFrame).
 
     Notes:
         pm4py must be installed separately. oceldb does not declare it as a
@@ -76,29 +72,22 @@ def read_pm4py(pm4py_ocel: Any) -> OCEL:
         )
     ).lazy()
 
-    # --- objects and static attribute → epoch object_changes ---
+    # --- objects (OCEL 2.0 only) ---
     obj_df = pm4py_ocel.objects
-    attr_cols = [c for c in obj_df.columns if c not in _OBJECT_CORE]
+    static_attr_cols = [c for c in obj_df.columns if c not in _OBJECT_CORE]
+    if static_attr_cols:
+        raise ValueError(
+            "read_pm4py only supports OCEL 2.0 logs, but the provided pm4py OCEL "
+            "stores static object attributes as columns on the objects table "
+            f"({static_attr_cols}), which indicates OCEL 1.0. Convert it to "
+            "OCEL 2.0 in pm4py before importing."
+        )
     obj_pl = pl.from_pandas(
         obj_df.rename(columns={_OID: s.OCEL_ID, _OTYPE: s.OCEL_TYPE})
     )
     objects = obj_pl.select(s.OCEL_ID, s.OCEL_TYPE).lazy()
 
-    if attr_cols:
-        epoch_ts = pl.lit(_EPOCH).str.to_datetime(time_unit="us")
-        oc_frames = [
-            obj_pl.select(
-                pl.col(s.OCEL_ID),
-                pl.col(s.OCEL_TYPE),
-                epoch_ts.alias(s.OCEL_TIME),
-                pl.lit(attr).alias(s.OCEL_CHANGED_FIELD),
-                pl.col(attr),
-            )
-            for attr in attr_cols
-        ]
-        oc = pl.concat(oc_frames).lazy()
-    else:
-        oc = _object_changes_from_pm4py(pm4py_ocel)
+    oc = _object_changes_from_pm4py(pm4py_ocel)
 
     # --- E2O from relations ---
     rel_df = pm4py_ocel.relations[
@@ -150,7 +139,7 @@ def _object_changes_from_pm4py(pm4py_ocel: Any) -> pl.LazyFrame:
     """Extract OCEL 2.0 object changes if available, else return empty frame."""
     oc_df = getattr(pm4py_ocel, "object_changes", None)
     if oc_df is None or len(oc_df) == 0:
-        return empty_lf(OC_SCHEMA)
+        return empty_lf(OBJECT_CHANGES_SCHEMA)
 
     # pm4py OCEL 2.0 long format: ocel:oid, ocel:type, ocel:timestamp, ocel:field, ocel:value
     oc_df = oc_df.copy()
@@ -161,12 +150,22 @@ def _object_changes_from_pm4py(pm4py_ocel: Any) -> pl.LazyFrame:
             {
                 s.OCEL_ID: str(row[_OID]),
                 s.OCEL_TYPE: str(row[_OTYPE]),
-                s.OCEL_TIME: str(row[_TIMESTAMP]),
+                s.OCEL_TIME: _to_iso(row[_TIMESTAMP]),
                 s.OCEL_CHANGED_FIELD: field,
                 field: row.get("ocel:value"),
             }
         )
     if not rows:
-        return empty_lf(OC_SCHEMA)
-    lf = rows_to_lf(rows)
-    return lf.with_columns(pl.col(s.OCEL_TIME).cast(pl.Datetime("us", "UTC")))
+        return empty_lf(OBJECT_CHANGES_SCHEMA)
+    return parse_timestamps(rows_to_lf(rows), s.OCEL_TIME)
+
+
+def _to_iso(value: Any) -> str:
+    """Render a pm4py timestamp as an ISO 8601 string for :func:`parse_timestamps`.
+
+    pandas ``Timestamp`` and ``datetime`` values expose ``isoformat`` (which uses
+    the ``T`` separator that :func:`parse_timestamps` expects); anything else is
+    passed through as its plain string form.
+    """
+    isoformat = getattr(value, "isoformat", None)
+    return isoformat() if callable(isoformat) else str(value)

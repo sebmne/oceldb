@@ -6,8 +6,8 @@ from typing import overload
 import polars as pl
 
 from oceldb import schema as s
+from oceldb.utils import to_list
 from oceldb.utils._step import _step
-from oceldb.filters._utils import _to_list
 from oceldb.ocel import OCEL
 
 _FIXED = {s.OCEL_ID, s.OCEL_TIME, s.OCEL_EVENT_ID, s.OCEL_EVENT_TYPE, s.OCEL_TYPE}
@@ -64,7 +64,7 @@ def case_table(
     )
 
     if object_types is not None:
-        e2o = e2o.filter(pl.col(s.OCEL_OBJECT_TYPE).is_in(_to_list(object_types)))
+        e2o = e2o.filter(pl.col(s.OCEL_OBJECT_TYPE).is_in(to_list(object_types)))
 
     trace = (
         e2o.group_by(s.OCEL_OBJECT_ID, s.OCEL_OBJECT_TYPE)

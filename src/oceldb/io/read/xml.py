@@ -5,17 +5,7 @@ from pathlib import Path
 from typing import Any
 
 from oceldb import schema as s
-from oceldb.io.read._common import (
-    E2O_SCHEMA,
-    EVENTS_SCHEMA,
-    O2O_SCHEMA,
-    OC_SCHEMA,
-    OBJECTS_SCHEMA,
-    _EPOCH,
-    empty_lf,
-    parse_timestamps,
-    rows_to_lf,
-)
+from oceldb.io.read._common import _EPOCH, build_ocel
 from oceldb.ocel import OCEL
 
 # Maps OCEL 2.0 declared attribute types to Python callables for value casting.
@@ -49,8 +39,8 @@ def read_xml(path: str | Path) -> OCEL:
         ET.ParseError: If the file is not valid XML.
 
     Examples:
-        >>> from oceldb.io import read_ocel_xml
-        >>> ocel = read_ocel_xml("log.xmlocel")
+        >>> from oceldb.io import read_xml
+        >>> ocel = read_xml("log.xmlocel")
     """
     path = Path(path)
     if not path.exists():
@@ -139,16 +129,12 @@ def read_xml(path: str | Path) -> OCEL:
                 }
             )
 
-    return OCEL(
-        events=parse_timestamps(rows_to_lf(event_rows), s.OCEL_TIME)
-        if event_rows
-        else empty_lf(EVENTS_SCHEMA),
-        objects=rows_to_lf(object_rows) if object_rows else empty_lf(OBJECTS_SCHEMA),
-        object_changes=parse_timestamps(rows_to_lf(oc_rows), s.OCEL_TIME)
-        if oc_rows
-        else empty_lf(OC_SCHEMA),
-        e2o=rows_to_lf(e2o_rows) if e2o_rows else empty_lf(E2O_SCHEMA),
-        o2o=rows_to_lf(o2o_rows) if o2o_rows else empty_lf(O2O_SCHEMA),
+    return build_ocel(
+        event_rows=event_rows,
+        object_rows=object_rows,
+        object_change_rows=oc_rows,
+        e2o_rows=e2o_rows,
+        o2o_rows=o2o_rows,
     )
 
 

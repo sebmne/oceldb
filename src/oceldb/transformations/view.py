@@ -6,8 +6,9 @@ from typing import overload
 import polars as pl
 
 from oceldb import schema as s
+from oceldb.utils import to_list
 from oceldb.utils._step import _step
-from oceldb.filters._utils import _to_list
+from oceldb.pruning import prune_log
 from oceldb.ocel import OCEL
 
 
@@ -53,7 +54,7 @@ def view(
         A new ``OCEL`` holding the connected core of the selection.
 
     Examples:
-        >>> from oceldb.filters import view
+        >>> from oceldb.transformations import view
         >>> orders = view(ocel, object_types=["order", "item"])
         >>> paid = view(ocel, event_types=["Pay Order"], object_types=["order"])
         >>> result = ocel >> view(object_types="order") >> view(event_types="Pay Order")
@@ -61,36 +62,21 @@ def view(
     relations = ocel.event_object()
     if event_types is not None:
         relations = relations.filter(
-            pl.col(s.OCEL_EVENT_TYPE).is_in(_to_list(event_types))
+            pl.col(s.OCEL_EVENT_TYPE).is_in(to_list(event_types))
         )
     if object_types is not None:
         relations = relations.filter(
-            pl.col(s.OCEL_OBJECT_TYPE).is_in(_to_list(object_types))
+            pl.col(s.OCEL_OBJECT_TYPE).is_in(to_list(object_types))
         )
     kept_events = relations.select(s.OCEL_EVENT_ID).unique()
     kept_objects = relations.select(s.OCEL_OBJECT_ID).unique()
-    return OCEL(
+    return prune_log(
+        ocel,
         events=ocel.events().join(
             kept_events, left_on=s.OCEL_ID, right_on=s.OCEL_EVENT_ID, how="semi"
         ),
         objects=ocel.objects().join(
             kept_objects, left_on=s.OCEL_ID, right_on=s.OCEL_OBJECT_ID, how="semi"
-        ),
-        object_changes=ocel.object_changes().join(
-            kept_objects, left_on=s.OCEL_ID, right_on=s.OCEL_OBJECT_ID, how="semi"
-        ),
-        o2o=ocel.object_object()
-        .join(
-            kept_objects,
-            left_on=s.OCEL_SOURCE_ID,
-            right_on=s.OCEL_OBJECT_ID,
-            how="semi",
-        )
-        .join(
-            kept_objects,
-            left_on=s.OCEL_TARGET_ID,
-            right_on=s.OCEL_OBJECT_ID,
-            how="semi",
         ),
         e2o=relations,
     )

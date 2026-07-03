@@ -6,8 +6,10 @@ from typing import Literal, overload
 import polars as pl
 
 from oceldb import schema as s
+from oceldb.utils import to_list
 from oceldb.utils._step import _step
-from oceldb.filters._utils import _to_list
+from oceldb.filters._utils import _scoped_match
+from oceldb.pruning import prune_log
 from oceldb.ocel import OCEL
 
 
@@ -19,6 +21,8 @@ def filter_objects_by_o2o_count(
     max_count: int | None = ...,
     related_types: str | Iterable[str] | None = ...,
     direction: Literal["in", "out", "both"] = ...,
+    object_types: str | Iterable[str] | None = ...,
+    mode: Literal["include", "exclude"] = ...,
 ) -> OCEL: ...
 
 
@@ -29,6 +33,8 @@ def filter_objects_by_o2o_count(
     max_count: int | None = ...,
     related_types: str | Iterable[str] | None = ...,
     direction: Literal["in", "out", "both"] = ...,
+    object_types: str | Iterable[str] | None = ...,
+    mode: Literal["include", "exclude"] = ...,
 ) -> Callable[[OCEL], OCEL]: ...
 
 
@@ -40,6 +46,8 @@ def filter_objects_by_o2o_count(
     max_count: int | None = None,
     related_types: str | Iterable[str] | None = None,
     direction: Literal["in", "out", "both"] = "both",
+    object_types: str | Iterable[str] | None = None,
+    mode: Literal["include", "exclude"] = "include",
 ) -> OCEL:
     """Keep objects whose O2O relation count satisfies the given bounds.
 
@@ -51,6 +59,11 @@ def filter_objects_by_o2o_count(
             is of these types. ``None`` counts all O2O relations.
         direction: Which relations to count — ``"out"`` (object is source),
             ``"in"`` (object is target), or ``"both"`` (default).
+        object_types: Object type(s) the filter applies to. ``None`` (default)
+            applies it to all objects; objects of other types pass through
+            unchanged.
+        mode: ``"include"`` (default) keeps objects whose count is within bounds;
+            ``"exclude"`` keeps objects whose count is outside them.
 
     Examples:
         >>> from oceldb.filters import filter_objects_by_o2o_count
@@ -75,7 +88,7 @@ def filter_objects_by_o2o_count(
     if direction in ("out", "both"):
         src = o2o
         if related_types is not None:
-            src = src.filter(pl.col(s.OCEL_TARGET_TYPE).is_in(_to_list(related_types)))
+            src = src.filter(pl.col(s.OCEL_TARGET_TYPE).is_in(to_list(related_types)))
         out_counts = (
             src.group_by(s.OCEL_SOURCE_ID)
             .agg(pl.len().alias("_count"))
@@ -85,7 +98,7 @@ def filter_objects_by_o2o_count(
     if direction in ("in", "both"):
         tgt = o2o
         if related_types is not None:
-            tgt = tgt.filter(pl.col(s.OCEL_SOURCE_TYPE).is_in(_to_list(related_types)))
+            tgt = tgt.filter(pl.col(s.OCEL_SOURCE_TYPE).is_in(to_list(related_types)))
         in_counts = (
             tgt.group_by(s.OCEL_TARGET_ID)
             .agg(pl.len().alias("_count"))
@@ -105,40 +118,30 @@ def filter_objects_by_o2o_count(
 
     object_counts = (
         ocel.objects()
-        .select(s.OCEL_ID)
+        .select(s.OCEL_ID, s.OCEL_TYPE)
         .join(combined, on=s.OCEL_ID, how="left")
         .with_columns(pl.col("_count").fill_null(0))
     )
+    in_bounds = pl.lit(True)
     if min_count is not None:
-        object_counts = object_counts.filter(pl.col("_count") >= min_count)
+        in_bounds = in_bounds & (pl.col("_count") >= min_count)
     if max_count is not None:
-        object_counts = object_counts.filter(pl.col("_count") <= max_count)
+        in_bounds = in_bounds & (pl.col("_count") <= max_count)
+    scope = to_list(object_types) if object_types is not None else None
+    keep = _scoped_match(in_bounds, type_col=s.OCEL_TYPE, scope=scope, mode=mode)
 
-    kept_objects = object_counts.select(pl.col(s.OCEL_ID).alias(s.OCEL_OBJECT_ID))
+    kept_objects = object_counts.filter(keep).select(
+        pl.col(s.OCEL_ID).alias(s.OCEL_OBJECT_ID)
+    )
     relations = ocel.event_object().join(kept_objects, on=s.OCEL_OBJECT_ID, how="semi")
     kept_events = relations.select(s.OCEL_EVENT_ID).unique()
-    return OCEL(
+    return prune_log(
+        ocel,
         events=ocel.events().join(
             kept_events, left_on=s.OCEL_ID, right_on=s.OCEL_EVENT_ID, how="semi"
         ),
         objects=ocel.objects().join(
             kept_objects, left_on=s.OCEL_ID, right_on=s.OCEL_OBJECT_ID, how="semi"
-        ),
-        object_changes=ocel.object_changes().join(
-            kept_objects, left_on=s.OCEL_ID, right_on=s.OCEL_OBJECT_ID, how="semi"
-        ),
-        o2o=ocel.object_object()
-        .join(
-            kept_objects,
-            left_on=s.OCEL_SOURCE_ID,
-            right_on=s.OCEL_OBJECT_ID,
-            how="semi",
-        )
-        .join(
-            kept_objects,
-            left_on=s.OCEL_TARGET_ID,
-            right_on=s.OCEL_OBJECT_ID,
-            how="semi",
         ),
         e2o=relations,
     )

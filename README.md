@@ -110,35 +110,54 @@ objects, and relations pointing to removed rows are dropped together.
 Every filter supports two equivalent call styles:
 
 ```python
-from oceldb.filters import filter_object_types, filter_time
+from oceldb.filters import filter_objects_by_type, filter_events_by_time
 
-branches_and_users = filter_object_types(ocel, "branches", "users")
+branches_and_users = filter_objects_by_type(ocel, "branches", "users")
 
 recent_branches_and_users = (
     ocel
-    >> filter_object_types("branches", "users")
-    >> filter_time(start="2024-01-01", end="2024-06-30")
+    >> filter_objects_by_type("branches", "users")
+    >> filter_events_by_time(start="2024-01-01", end="2024-06-30")
 )
 ```
 
 The preferred usage is `>>` as it easily allows for extending a single filter
 to a filter pipeline.
 
+Two keyword arguments are consistent across the predicate filters:
+
+- **scope** — `event_types=` on event filters and `object_types=` on object
+  filters restricts *which* types the filter applies to. Rows of other types
+  always pass through unchanged. `None` (the default) applies the filter to
+  every type.
+- **`mode`** — `"include"` (default) keeps the matching rows; `"exclude"` keeps
+  the complement (within the scope).
+
+```python
+# Drop only the "pay order" events after a cutoff; every other event is kept
+ocel >> filter_events_by_time(
+    start="2024-01-01", event_types="pay order", mode="exclude"
+)
+```
+
+`filter_events_by_type` / `filter_objects_by_type` take only `mode` (types are
+their subject), and `sample_events` / `sample_objects` take neither.
+
 Event filters:
 
 ```python
 import polars as pl
 from oceldb.filters import (
-    filter_event_ids,
-    filter_event_types,
     filter_events_by_attribute,
+    filter_events_by_id,
     filter_events_by_object_count,
-    filter_time,
+    filter_events_by_time,
+    filter_events_by_type,
 )
 
-paid = ocel >> filter_event_types("Pay Order")
-without_cancellations = ocel >> filter_event_types("Cancel Order", mode="exclude")
-selected_events = ocel >> filter_event_ids("e-001", "e-042")
+paid = ocel >> filter_events_by_type("Pay Order")
+without_cancellations = ocel >> filter_events_by_type("Cancel Order", mode="exclude")
+selected_events = ocel >> filter_events_by_id("e-001", "e-042")
 large_payments = ocel >> filter_events_by_attribute(
     pl.col("amount") >= 1000,
     event_types="Pay Order",
@@ -147,7 +166,7 @@ multi_object_events = ocel >> filter_events_by_object_count(
     min_count=2,
     object_types="item",
 )
-first_quarter = ocel >> filter_time(start="2024-01-01", end="2024-03-31")
+first_quarter = ocel >> filter_events_by_time(start="2024-01-01", end="2024-03-31")
 ```
 
 Object filters:
@@ -155,15 +174,15 @@ Object filters:
 ```python
 import polars as pl
 from oceldb.filters import (
-    filter_object_ids,
-    filter_object_types,
     filter_objects_by_attribute,
     filter_objects_by_event_count,
+    filter_objects_by_id,
     filter_objects_by_o2o_count,
+    filter_objects_by_type,
 )
 
-orders_and_items = ocel >> filter_object_types("order", "item")
-without_test_objects = ocel >> filter_object_ids("test-order-1", mode="exclude")
+orders_and_items = ocel >> filter_objects_by_type("order", "item")
+without_test_objects = ocel >> filter_objects_by_id("test-order-1", mode="exclude")
 expensive_orders = ocel >> filter_objects_by_attribute(
     pl.col("price") > 100,
     object_types="order",
@@ -184,6 +203,63 @@ bundled_orders = ocel >> filter_objects_by_o2o_count(
 `object_states()`. Use `"sometimes"` for at least one matching state,
 `"always"` for every recorded state, or a timestamp string for the last known
 state at or before that time.
+
+Relation and sampling filters:
+
+```python
+from oceldb.filters import (
+    filter_e2o_by_qualifier,
+    filter_o2o_by_qualifier,
+    sample_events,
+    sample_objects,
+)
+
+# Keep only event-to-object relations with a given qualifier (prunes the core)
+delivered = ocel >> filter_e2o_by_qualifier("receives")
+# Trim object-to-object edges by qualifier (objects/events are left untouched)
+containment = ocel >> filter_o2o_by_qualifier("contains")
+# Random sub-logs for previews or quick experiments
+preview = ocel >> sample_events(1000, seed=0)
+tenth = ocel >> sample_objects(fraction=0.1, seed=0)
+```
+
+## Log Operations
+
+Beyond filtering, oceldb ships the operations you almost always need after
+importing or before exporting a log.
+
+Check and repair referential integrity (readers and manual construction do not
+guarantee it):
+
+```python
+from oceldb.validation import validate, clean
+
+report = validate(ocel)
+if not report.is_valid:
+    ocel = ocel >> clean()  # drop dangling relations, dedupe ids, sort events
+```
+
+Relabel type names consistently across every table:
+
+```python
+from oceldb.transformations import rename_types
+
+ocel = ocel >> rename_types(
+    events={"place order": "Place Order"},
+    objects={"orders": "Order"},
+)
+```
+
+Combine several logs, and inspect a log programmatically:
+
+```python
+from oceldb import OCEL
+
+combined = OCEL.merge(ocel_a, ocel_b)   # union, de-duplicating shared ids
+
+summary = ocel.describe()               # counts, per-type counts, time span
+summary.events, summary.event_types, summary.start_time, summary.end_time
+```
 
 ## Manual Construction
 

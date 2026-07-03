@@ -1,7 +1,6 @@
 from pathlib import Path
-from oceldb.io.convert_sqlite import convert_sqlite
 
-
+from oceldb.io.read.convert_sqlite import convert_sqlite
 from oceldb.ocel import OCEL
 from oceldb.utils.cache import conversion_cache_dir
 
@@ -10,8 +9,8 @@ def read_sqlite(source: str | Path) -> OCEL:
     """Open an OCEL 2.0 SQLite export as an :class:`~oceldb.OCEL`.
 
     Converts the SQLite file to oceldb's native Hive-partitioned Parquet layout
-    and returns an ``OCEL`` backed by those files. Unlike :func:`read_ocel_json`
-    and :func:`read_ocel_xml`, the result is **file-backed and fully lazy** —
+    and returns an ``OCEL`` backed by those files. Unlike :func:`read_json`
+    and :func:`read_xml`, the result is **file-backed and fully lazy** —
     no data is loaded into RAM until you call ``.collect()`` on a frame. This
     makes it suitable for logs that are too large to hold in memory.
 

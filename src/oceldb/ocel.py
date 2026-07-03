@@ -20,6 +20,7 @@ schema:
 import html
 from collections.abc import Callable, Iterable, Sequence
 from dataclasses import dataclass
+from datetime import datetime
 from pathlib import Path
 from typing import TypeVar, cast
 import polars as pl
@@ -42,6 +43,27 @@ class _Overview:
     o2o: int
     event_types: list[str]
     object_types: list[str]
+
+
+@dataclass(frozen=True)
+class OCELSummary:
+    """Summary statistics for an :class:`OCEL`, returned by :meth:`OCEL.describe`.
+
+    ``event_types`` and ``object_types`` map each type name to its row count in
+    the ``events`` / ``objects`` tables. ``start_time`` and ``end_time`` are the
+    earliest and latest ``ocel_time`` across events, or ``None`` for an empty
+    log.
+    """
+
+    events: int
+    objects: int
+    object_changes: int
+    e2o: int
+    o2o: int
+    event_types: dict[str, int]
+    object_types: dict[str, int]
+    start_time: datetime | None
+    end_time: datetime | None
 
 
 class OCEL:
@@ -303,6 +325,34 @@ class OCEL:
         """
         return self._o2o
 
+    def describe(self) -> OCELSummary:
+        """Compute summary statistics for the log.
+
+        Returns:
+            An :class:`OCELSummary` with row counts for each of the five tables,
+            per-type event and object counts, and the earliest and latest event
+            timestamps. This is the programmatic counterpart to the log's
+            ``repr``; every value is materialized, so calling it executes the
+            underlying scans.
+
+        Examples:
+            >>> summary = ocel.describe()
+            >>> summary.events
+            >>> summary.event_types["Pay Order"]
+            >>> summary.start_time, summary.end_time
+        """
+        return OCELSummary(
+            events=_count(self._events),
+            objects=_count(self._objects),
+            object_changes=_count(self._object_changes),
+            e2o=_count(self._e2o),
+            o2o=_count(self._o2o),
+            event_types=_type_counts(self._events),
+            object_types=_type_counts(self._objects),
+            start_time=_time_bound(self._events, descending=False),
+            end_time=_time_bound(self._events, descending=True),
+        )
+
     def __rshift__(self, step: Callable[["OCEL"], _T]) -> _T:
         """Apply a step, enabling ``ocel >> step(...)`` pipeline syntax."""
         return step(self)
@@ -360,7 +410,7 @@ class OCEL:
         Args:
             path: Directory written by :meth:`write`,
                 :func:`oceldb.store.write_frames`, or
-                :func:`oceldb.io.sqlite.convert_sqlite`.
+                :func:`oceldb.io.convert_sqlite`.
 
         Returns:
             An ``OCEL`` backed by lazy Polars scans of the Parquet files under
@@ -383,6 +433,51 @@ class OCEL:
             object_changes=frames["object_changes"],
             o2o=frames["o2o"],
             e2o=frames["e2o"],
+        )
+
+    @classmethod
+    def merge(cls, *ocels: "OCEL") -> "OCEL":
+        """Combine several logs into one by taking the union of their tables.
+
+        Frames are concatenated column-wise aligned (attributes unique to one
+        log become null elsewhere). Events and objects are de-duplicated by
+        ``ocel_id`` keeping the first occurrence, so shared ids across logs are
+        not repeated; object changes and relations are de-duplicated on their
+        full rows. The inputs are treated as lazy, so no data is read until the
+        result is collected or written.
+
+        Args:
+            *ocels: One or more logs to merge. At least one is required.
+
+        Returns:
+            A new ``OCEL`` holding the union of the inputs.
+
+        Raises:
+            ValueError: If no logs are supplied.
+
+        Notes:
+            Merging assumes ids are globally meaningful: if two logs use the
+            same ``ocel_id`` for different real-world entities, relabel one side
+            first. Combining conflicting rows is not detected.
+
+        Examples:
+            >>> combined = OCEL.merge(ocel_a, ocel_b)
+            >>> combined = OCEL.merge(*monthly_logs)
+        """
+        if not ocels:
+            raise ValueError("merge requires at least one OCEL.")
+        return cls(
+            events=_concat_unique(
+                [o._events for o in ocels], subset=[s.OCEL_ID]
+            ),
+            objects=_concat_unique(
+                [o._objects for o in ocels], subset=[s.OCEL_ID]
+            ),
+            object_changes=_concat_unique(
+                [o._object_changes for o in ocels], subset=None
+            ),
+            o2o=_concat_unique([o._o2o for o in ocels], subset=None),
+            e2o=_concat_unique([o._e2o for o in ocels], subset=None),
         )
 
     def write(self, target: str | Path, *, overwrite: bool = False) -> None:
@@ -502,6 +597,39 @@ def _distinct_types(frame: pl.LazyFrame) -> list[str]:
         .to_list()
     )
     return [str(value) for value in values]
+
+
+def _type_counts(frame: pl.LazyFrame) -> dict[str, int]:
+    df = (
+        frame.select(s.OCEL_TYPE)
+        .drop_nulls()
+        .group_by(s.OCEL_TYPE)
+        .len()
+        .sort(s.OCEL_TYPE)
+        .collect()
+    )
+    return {
+        str(name): int(cast(int, count))
+        for name, count in zip(
+            df.get_column(s.OCEL_TYPE).to_list(), df.get_column("len").to_list()
+        )
+    }
+
+
+def _time_bound(frame: pl.LazyFrame, *, descending: bool) -> datetime | None:
+    column = pl.col(s.OCEL_TIME)
+    agg = column.max() if descending else column.min()
+    value = frame.select(agg.alias("bound")).collect().item()
+    return cast("datetime | None", value)
+
+
+def _concat_unique(
+    frames: list[pl.LazyFrame], *, subset: list[str] | None
+) -> pl.LazyFrame:
+    combined = pl.concat(frames, how="diagonal_relaxed")
+    if subset is None:
+        return combined.unique(maintain_order=True)
+    return combined.unique(subset=subset, keep="first", maintain_order=True)
 
 
 def _rows(count: int) -> str:

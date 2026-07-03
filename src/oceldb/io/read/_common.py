@@ -5,6 +5,7 @@ from typing import Any
 import polars as pl
 
 from oceldb import schema as s
+from oceldb.ocel import OCEL
 
 _EPOCH = "1970-01-01T00:00:00+00:00"
 
@@ -17,7 +18,7 @@ OBJECTS_SCHEMA: dict[str, pl.DataType] = {
     s.OCEL_ID: pl.String(),
     s.OCEL_TYPE: pl.String(),
 }
-OC_SCHEMA: dict[str, pl.DataType] = {
+OBJECT_CHANGES_SCHEMA: dict[str, pl.DataType] = {
     s.OCEL_ID: pl.String(),
     s.OCEL_TIME: pl.Datetime("us", "UTC"),
     s.OCEL_TYPE: pl.String(),
@@ -47,6 +48,33 @@ def empty_lf(schema: dict[str, pl.DataType]) -> pl.LazyFrame:
 
 def rows_to_lf(rows: list[dict[str, Any]]) -> pl.LazyFrame:
     return pl.from_dicts(rows, infer_schema_length=None).lazy()
+
+
+def build_ocel(
+    *,
+    event_rows: list[dict[str, Any]],
+    object_rows: list[dict[str, Any]],
+    object_change_rows: list[dict[str, Any]],
+    e2o_rows: list[dict[str, Any]],
+    o2o_rows: list[dict[str, Any]],
+) -> OCEL:
+    """Assemble an in-memory ``OCEL`` from parsed row dictionaries.
+
+    Each list of rows is turned into a lazy frame; empty lists fall back to a
+    correctly typed empty frame. Event and object-change timestamps are parsed
+    from their ISO 8601 string form. Shared by the JSON and XML readers.
+    """
+    return OCEL(
+        events=parse_timestamps(rows_to_lf(event_rows), s.OCEL_TIME)
+        if event_rows
+        else empty_lf(EVENTS_SCHEMA),
+        objects=rows_to_lf(object_rows) if object_rows else empty_lf(OBJECTS_SCHEMA),
+        object_changes=parse_timestamps(rows_to_lf(object_change_rows), s.OCEL_TIME)
+        if object_change_rows
+        else empty_lf(OBJECT_CHANGES_SCHEMA),
+        e2o=rows_to_lf(e2o_rows) if e2o_rows else empty_lf(E2O_SCHEMA),
+        o2o=rows_to_lf(o2o_rows) if o2o_rows else empty_lf(O2O_SCHEMA),
+    )
 
 
 def parse_timestamps(lf: pl.LazyFrame, col: str) -> pl.LazyFrame:

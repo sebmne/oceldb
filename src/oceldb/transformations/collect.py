@@ -23,8 +23,7 @@ def collect() -> _CollectStep:
         :class:`polars.DataFrame`.
 
     Examples:
-        >>> from oceldb import collect
-        >>> from oceldb.transformations import flatten
+        >>> from oceldb.transformations import collect, flatten
         >>> df = ocel >> flatten("order") >> collect()
         >>> df = ocel >> view(object_types="order") >> flatten("order") >> collect()
     """

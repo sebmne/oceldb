@@ -7,6 +7,7 @@ import polars as pl
 
 from oceldb import schema as s
 from oceldb.utils._step import _step
+from oceldb.pruning import prune_log
 from oceldb.ocel import OCEL
 
 
@@ -38,7 +39,7 @@ def project(ocel: OCEL, *object_ids: str) -> OCEL:
         attribute columns are pruned to that connected core.
 
     Examples:
-        >>> from oceldb.filters import project
+        >>> from oceldb.transformations import project
         >>> sub = project(ocel, "order-42")
         >>> sub = project(ocel, "order-42", "order-99")
         >>> result = ocel >> view(object_types=["order"]) >> project("order-42")
@@ -51,28 +52,13 @@ def project(ocel: OCEL, *object_ids: str) -> OCEL:
     )
     relations = ocel.event_object().join(kept_events, on=s.OCEL_EVENT_ID, how="semi")
     kept_objects = relations.select(s.OCEL_OBJECT_ID).unique()
-    return OCEL(
+    return prune_log(
+        ocel,
         events=ocel.events().join(
             kept_events, left_on=s.OCEL_ID, right_on=s.OCEL_EVENT_ID, how="semi"
         ),
         objects=ocel.objects().join(
             kept_objects, left_on=s.OCEL_ID, right_on=s.OCEL_OBJECT_ID, how="semi"
-        ),
-        object_changes=ocel.object_changes().join(
-            kept_objects, left_on=s.OCEL_ID, right_on=s.OCEL_OBJECT_ID, how="semi"
-        ),
-        o2o=ocel.object_object()
-        .join(
-            kept_objects,
-            left_on=s.OCEL_SOURCE_ID,
-            right_on=s.OCEL_OBJECT_ID,
-            how="semi",
-        )
-        .join(
-            kept_objects,
-            left_on=s.OCEL_TARGET_ID,
-            right_on=s.OCEL_OBJECT_ID,
-            how="semi",
         ),
         e2o=relations,
     )
