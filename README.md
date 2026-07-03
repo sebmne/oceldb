@@ -77,10 +77,25 @@ convert_sqlite("source.sqlite", "converted-log", overwrite=True)
 ocel = OCEL.read("converted-log")
 ```
 
+`read_json`, `read_xml`, and `read_pm4py` build an **in-memory** `OCEL` from the
+standard OCEL 2.0 exchange formats:
+
+```python
+from oceldb.io import read_json, read_xml, read_pm4py
+
+ocel = read_json("log.jsonocel")
+ocel = read_xml("log.xmlocel")
+
+import pm4py
+ocel = read_pm4py(pm4py.read_ocel2_xml("log.xmlocel"))  # OCEL 2.0 only
+```
+
+These parse the whole file into memory. For very large logs prefer
+`read_sqlite`, which produces file-backed lazy frames instead.
+
 ## The OCEL API
 
-`OCEL` is a lightweight handle around five lazy frames. It does not own a
-database connection and does not need to be used as a context manager.
+`OCEL` is a lightweight handle around five lazy frames.
 
 ```python
 ocel.events()                 # all events
@@ -223,6 +238,62 @@ preview = ocel >> sample_events(1000, seed=0)
 tenth = ocel >> sample_objects(fraction=0.1, seed=0)
 ```
 
+## Transformations
+
+`oceldb.transformations` derives new tables or sub-logs from an `OCEL`. Like
+filters, each can be called directly or as a `>>` pipe step.
+
+`view` and `project` return a new `OCEL` (a sub-log with the connected core
+pruned):
+
+```python
+from oceldb.transformations import view, project
+
+# Restrict to selected event and/or object types
+orders_view = ocel >> view(object_types=["order", "item"], event_types=["Pay Order"])
+
+# Every event involving the given object(s), plus their co-participating objects
+around_order = ocel >> project("order-42")
+```
+
+`flatten` projects the log onto one object type as a classical XES-style event
+log (a `LazyFrame`) — the standard input for control-flow discovery:
+
+```python
+from oceldb.transformations import flatten, collect
+
+log = ocel >> flatten("order") >> collect()
+```
+
+Its columns are:
+
+- `case:concept:name` (object id / case), `concept:name` (activity),
+  `time:timestamp` (event time).
+- `case:<attribute>` — one per object attribute that is **static** (never takes
+  more than one value for *any* object of the type). These are genuine case
+  attributes, constant within each case.
+- `<attribute>` — one per object attribute that **changes** for some object,
+  holding its value *as of that event* (event-level, forward-filled).
+- `<attribute>` — one per event payload attribute.
+- `ocel_event_id`.
+
+An object attribute and an event attribute sharing a name would be ambiguous in
+a flattened row, so `flatten` raises `ValueError` in that case — rename one side
+first (e.g. with `rename_types`, below).
+
+`case_table` summarizes each object as a single row — lifecycle span, event
+count, first/last activity, and last-known attribute values — a feature table
+for machine learning and decision mining:
+
+```python
+from oceldb.transformations import case_table
+
+features = ocel >> case_table(object_types="order") >> collect()
+```
+
+`collect()` is a terminal pipe step that materializes the preceding lazy frame,
+so an entire pipeline reads as one expression.
+
 ## Log Operations
 
 Beyond filtering, oceldb ships the operations you almost always need after
@@ -260,6 +331,22 @@ combined = OCEL.merge(ocel_a, ocel_b)   # union, de-duplicating shared ids
 summary = ocel.describe()               # counts, per-type counts, time span
 summary.events, summary.event_types, summary.start_time, summary.end_time
 ```
+
+## Exporting
+
+Write the native Parquet layout, or export to an interchange format:
+
+```python
+from oceldb.io import write_sqlite, write_xes
+from oceldb.transformations import flatten
+
+ocel.write("my-log", overwrite=True)                # native Parquet directory
+write_sqlite(ocel, "out.sqlite", overwrite=True)    # OCEL 2.0 SQLite
+write_xes(ocel >> flatten("order"), "orders.xes")   # a flattened log to XES
+```
+
+`write_sqlite` produces a standard OCEL 2.0 SQLite database (readable again with
+`read_sqlite` or any OCEL 2.0 tool). `write_xes` takes the output of `flatten`.
 
 ## Manual Construction
 
