@@ -25,8 +25,13 @@ _OID = "ocel:oid"
 _OID2 = "ocel:oid_2"
 _OTYPE = "ocel:type"
 _QUALIFIER = "ocel:qualifier"
+_FIELD = "ocel:field"
+_VALUE = "ocel:value"
+_CHANGED_FIELD = "ocel:changed_field"
+_CUMCOUNT = "@@cumcount"
 
 _OBJECT_CORE = {_OID, _OTYPE}
+_OBJECT_CHANGE_CORE = {_OID, _OTYPE, _TIMESTAMP, _FIELD, _CHANGED_FIELD, _CUMCOUNT}
 
 
 def read_pm4py(pm4py_ocel: Any) -> OCEL:
@@ -139,20 +144,12 @@ def _object_changes_from_pm4py(
 
     oc_df = getattr(pm4py_ocel, "object_changes", None)
     if oc_df is not None and len(oc_df) > 0:
-        # pm4py OCEL 2.0 long format: ocel:oid, ocel:type, ocel:timestamp,
-        # ocel:field, ocel:value
+        # PM4PY exposes object changes in two shapes:
+        # - long: ocel:oid, ocel:type, ocel:timestamp, ocel:field, ocel:value
+        # - sparse wide: ocel:oid, ocel:type, ocel:timestamp, ocel:field, <attr columns...>
         oc_df = oc_df.copy()
         for _, row in oc_df.iterrows():
-            field = str(row.get("ocel:field", row.get("ocel:changed_field", "")))
-            rows.append(
-                {
-                    s.OCEL_ID: str(row[_OID]),
-                    s.OCEL_TYPE: str(row[_OTYPE]),
-                    s.OCEL_TIME: _to_iso(row[_TIMESTAMP]),
-                    s.OCEL_CHANGED_FIELD: field,
-                    field: row.get("ocel:value"),
-                }
-            )
+            rows.extend(_object_change_rows(row, pd))
 
     for _, row in obj_df.iterrows():
         for field in static_attr_cols:
@@ -172,6 +169,53 @@ def _object_changes_from_pm4py(
     if not rows:
         return empty_lf(OBJECT_CHANGES_SCHEMA)
     return parse_timestamps(rows_to_lf(rows), s.OCEL_TIME)
+
+
+def _object_change_rows(row: Any, pd: Any) -> list[dict[str, Any]]:
+    changed_field = _field_name(row, pd)
+    if changed_field:
+        value = _changed_value(row, changed_field, pd)
+        if _is_missing(value, pd):
+            return []
+        return [_object_change_row(row, changed_field, value)]
+
+    rows: list[dict[str, Any]] = []
+    for field in row.index:
+        if field in _OBJECT_CHANGE_CORE:
+            continue
+        value = row.get(field)
+        if _is_missing(value, pd):
+            continue
+        rows.append(_object_change_row(row, str(field), value))
+    return rows
+
+
+def _field_name(row: Any, pd: Any) -> str:
+    for column in (_FIELD, _CHANGED_FIELD):
+        if column not in row:
+            continue
+        value = row.get(column)
+        if not _is_missing(value, pd):
+            return str(value)
+    return ""
+
+
+def _changed_value(row: Any, field: str, pd: Any) -> Any:
+    if _VALUE in row and not _is_missing(row.get(_VALUE), pd):
+        return row.get(_VALUE)
+    if field in row:
+        return row.get(field)
+    return None
+
+
+def _object_change_row(row: Any, field: str, value: Any) -> dict[str, Any]:
+    return {
+        s.OCEL_ID: str(row[_OID]),
+        s.OCEL_TYPE: str(row[_OTYPE]),
+        s.OCEL_TIME: _to_iso(row[_TIMESTAMP]),
+        s.OCEL_CHANGED_FIELD: field,
+        field: value,
+    }
 
 
 def _is_missing(value: Any, pd: Any) -> bool:
