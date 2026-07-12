@@ -1,33 +1,15 @@
 """rename_types: relabel event and object type names across a log."""
 
-from collections.abc import Callable, Mapping
-from typing import overload
+from collections.abc import Mapping
 
 import polars as pl
 
 from oceldb import schema as s
-from oceldb.utils._step import _step
+from oceldb.utils.step import step
 from oceldb.ocel import OCEL
 
 
-@overload
-def rename_types(
-    ocel: OCEL,
-    *,
-    events: Mapping[str, str] | None = ...,
-    objects: Mapping[str, str] | None = ...,
-) -> OCEL: ...
-
-
-@overload
-def rename_types(
-    *,
-    events: Mapping[str, str] | None = ...,
-    objects: Mapping[str, str] | None = ...,
-) -> Callable[[OCEL], OCEL]: ...
-
-
-@_step
+@step
 def rename_types(
     ocel: OCEL,
     *,
@@ -56,20 +38,24 @@ def rename_types(
     """
     event_map = dict(events) if events else None
     object_map = dict(objects) if objects else None
-    return OCEL(
+    return OCEL.from_frames(
         events=_remap(ocel.events(), s.OCEL_TYPE, event_map),
         objects=_remap(ocel.objects(), s.OCEL_TYPE, object_map),
         object_changes=_remap(ocel.object_changes(), s.OCEL_TYPE, object_map),
-        e2o=_remap(
+        event_object=_remap(
             _remap(ocel.event_object(), s.OCEL_EVENT_TYPE, event_map),
             s.OCEL_OBJECT_TYPE,
             object_map,
         ),
-        o2o=_remap(
+        object_object=_remap(
             _remap(ocel.object_object(), s.OCEL_SOURCE_TYPE, object_map),
             s.OCEL_TARGET_TYPE,
             object_map,
         ),
+        schema=ocel.schema.rename(events=event_map, objects=object_map)
+        if ocel.schema is not None
+        else None,
+        metadata=ocel.metadata,
     )
 
 

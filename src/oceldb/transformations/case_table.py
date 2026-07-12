@@ -1,31 +1,18 @@
 """case_table: one row per object summarising its lifecycle."""
 
-from collections.abc import Callable, Iterable
-from typing import overload
+from collections.abc import Iterable
 
 import polars as pl
 
 from oceldb import schema as s
 from oceldb.utils import to_list
-from oceldb.utils._step import _step
+from oceldb.utils.step import step
 from oceldb.ocel import OCEL
 
 _FIXED = {s.OCEL_ID, s.OCEL_TIME, s.OCEL_EVENT_ID, s.OCEL_EVENT_TYPE, s.OCEL_TYPE}
 
 
-@overload
-def case_table(
-    ocel: OCEL, *, object_types: str | Iterable[str] | None = ...
-) -> pl.LazyFrame: ...
-
-
-@overload
-def case_table(
-    *, object_types: str | Iterable[str] | None = ...
-) -> Callable[[OCEL], pl.LazyFrame]: ...
-
-
-@_step
+@step
 def case_table(
     ocel: OCEL, *, object_types: str | Iterable[str] | None = None
 ) -> pl.LazyFrame:

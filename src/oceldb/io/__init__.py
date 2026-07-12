@@ -1,19 +1,52 @@
 """File-format import and export helpers."""
 
-from oceldb.io.read.convert_sqlite import convert_sqlite
-from oceldb.io.read.json import read_json
-from oceldb.io.read.pm4py import read_pm4py
-from oceldb.io.read.sqlite import read_sqlite
-from oceldb.io.read.xml import read_xml
-from oceldb.io.write.sqlite import write_sqlite
-from oceldb.io.write.xes import write_xes
+from oceldb.io.api import (
+    ExchangeFormat,
+    export_ocel,
+    import_ocel,
+    open_ocel,
+)
+from oceldb.io.codecs import (
+    CodecCapabilities,
+    ExchangeCodec,
+    XES_CAPABILITIES,
+    exchange_codecs,
+)
+from oceldb.io.errors import OCELIOError, OCELIOWarning, ValidationMode
+from oceldb.io.exchange import (
+    import_json,
+    import_sqlite,
+    import_xml,
+    read_json,
+    read_xml,
+    write_json,
+    write_sqlite,
+    write_xml,
+)
+from oceldb.io.exports import write_xes
+from oceldb.io.integrations import from_pm4py, to_pm4py
 
 __all__ = [
-    "convert_sqlite",
+    "import_json",
+    "import_sqlite",
+    "import_xml",
+    "CodecCapabilities",
+    "ExchangeFormat",
+    "ExchangeCodec",
+    "exchange_codecs",
+    "export_ocel",
+    "import_ocel",
+    "OCELIOError",
+    "OCELIOWarning",
+    "open_ocel",
     "read_json",
-    "read_pm4py",
-    "read_sqlite",
+    "from_pm4py",
     "read_xml",
+    "to_pm4py",
+    "ValidationMode",
+    "write_json",
     "write_sqlite",
+    "write_xml",
     "write_xes",
+    "XES_CAPABILITIES",
 ]

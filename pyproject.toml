@@ -8,6 +8,7 @@ readme = "README.md"
 requires-python = ">=3.11"
 dependencies = [
     "duckdb>=1.5.1",
+    "ijson>=3.4.0",
     "polars>=1.35.2",
     "pyarrow>=24.0.0",
     "pyarrow-hotfix>=0.7",
@@ -57,3 +58,13 @@ extraPaths = ["src"]
 pythonVersion = "3.11"
 typeCheckingMode = "strict"
 reportMissingTypeStubs = false
+# Polars intentionally accepts broad expression inputs, which surface as
+# Unknown in its public annotations under strict mode. Keep strict checking for
+# concrete types while suppressing those third-party boundary diagnostics.
+reportUnknownArgumentType = false
+reportUnknownLambdaType = false
+reportUnknownMemberType = false
+reportUnknownVariableType = false
+# Package-private helpers are shared between the small filter modules.
+reportPrivateUsage = false
+reportUnusedFunction = false

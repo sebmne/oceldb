@@ -1,42 +1,19 @@
 """filter_events_by_object_count: keep events by number of related objects."""
 
-from collections.abc import Callable, Iterable
-from typing import Literal, overload
+from collections.abc import Iterable
+from typing import Literal
 
 import polars as pl
 
 from oceldb import schema as s
 from oceldb.utils import to_list
-from oceldb.utils._step import _step
-from oceldb.filters._utils import _scoped_match
-from oceldb.pruning import prune_log
+from oceldb.utils.step import step
+from oceldb.core.pruning import sublog_from_event_ids
+from oceldb.filters._utils import normalize_scope, scoped_match, within_bounds
 from oceldb.ocel import OCEL
 
 
-@overload
-def filter_events_by_object_count(
-    ocel: OCEL,
-    *,
-    min_count: int | None = ...,
-    max_count: int | None = ...,
-    object_types: str | Iterable[str] | None = ...,
-    event_types: str | Iterable[str] | None = ...,
-    mode: Literal["include", "exclude"] = ...,
-) -> OCEL: ...
-
-
-@overload
-def filter_events_by_object_count(
-    *,
-    min_count: int | None = ...,
-    max_count: int | None = ...,
-    object_types: str | Iterable[str] | None = ...,
-    event_types: str | Iterable[str] | None = ...,
-    mode: Literal["include", "exclude"] = ...,
-) -> Callable[[OCEL], OCEL]: ...
-
-
-@_step
+@step
 def filter_events_by_object_count(
     ocel: OCEL,
     *,
@@ -77,24 +54,9 @@ def filter_events_by_object_count(
         .with_columns(pl.col("_count").fill_null(0))
     )
 
-    in_bounds = pl.lit(True)
-    if min_count is not None:
-        in_bounds = in_bounds & (pl.col("_count") >= min_count)
-    if max_count is not None:
-        in_bounds = in_bounds & (pl.col("_count") <= max_count)
-    scope = to_list(event_types) if event_types is not None else None
-    keep = _scoped_match(in_bounds, type_col=s.OCEL_TYPE, scope=scope, mode=mode)
+    in_bounds = within_bounds(min_count=min_count, max_count=max_count)
+    scope = normalize_scope(event_types)
+    keep = scoped_match(in_bounds, type_col=s.OCEL_TYPE, scope=scope, mode=mode)
 
     kept_events = event_counts.filter(keep).select(s.OCEL_EVENT_ID)
-    relations = ocel.event_object().join(kept_events, on=s.OCEL_EVENT_ID, how="semi")
-    kept_objects = relations.select(s.OCEL_OBJECT_ID).unique()
-    return prune_log(
-        ocel,
-        events=ocel.events().join(
-            kept_events, left_on=s.OCEL_ID, right_on=s.OCEL_EVENT_ID, how="semi"
-        ),
-        objects=ocel.objects().join(
-            kept_objects, left_on=s.OCEL_ID, right_on=s.OCEL_OBJECT_ID, how="semi"
-        ),
-        e2o=relations,
-    )
+    return sublog_from_event_ids(ocel, kept_events)

@@ -5,11 +5,13 @@ Polars-backed access to OCEL 2.0 event logs.
 oceldb represents an object-centric event log as five lazy Polars tables:
 events, objects, object changes, event-object relations, and object-object
 relations. The native on-disk format is Parquet, split by event or object type
-for compact storage and fast type-filtered scans. OCEL 2.0 SQLite exports can
-be converted to that layout or opened through a conversion cache.
+for compact storage and fast type-filtered scans. OCEL 2.0 SQLite exports are
+imported explicitly into that native layout.
 
-All query methods return `polars.LazyFrame`. Nothing is materialized until you
-call `collect()`, `sink_parquet()`, or another Polars execution method.
+Core table accessors return `polars.LazyFrame`; execution normally begins when
+you call `collect()`, `sink_parquet()`, or another Polars execution method.
+Type-specific event/change accessors perform a small eager presence query to
+remove attribute columns that are null for every selected row.
 
 ## Installation
 
@@ -24,9 +26,10 @@ Requires Python 3.11+.
 ## Quick Start
 
 ```python
-from oceldb.io import read_sqlite
+from oceldb.io import import_sqlite, open_ocel
 
-ocel = read_sqlite("running-example.sqlite")
+import_sqlite("running-example.sqlite", "running-example")
+ocel = open_ocel("running-example")
 
 event_counts = (
     ocel.events()
@@ -46,52 +49,68 @@ latest_order_states = (
 )
 ```
 
-## Opening Logs
+## Opening and Importing Logs
 
-Use `OCEL.read(...)` for an existing native oceldb directory:
+Use `open_ocel(...)` for an existing native dataset. Opening is lazy: it reads
+the small manifest and constructs Parquet scans without loading row data.
+
+```python
+from oceldb.io import open_ocel
+
+ocel = open_ocel("native-log")
+```
+
+Use `import_ocel(...)` to convert an OCEL 2.0 exchange file into reusable
+native storage. The returned log is opened lazily from the new native dataset.
+Under the default strict validation, JSON and XML records are parsed
+incrementally into typed Parquet batches; SQLite is converted directly through
+DuckDB. Permissive `warn` and `none` imports currently use the eager fallback.
+
+```python
+from oceldb.io import import_ocel
+
+ocel = import_ocel("log.jsonocel", "native-log")
+ocel = import_ocel("log.xmlocel", "native-log", overwrite=True)
+ocel = import_ocel("log.sqlite", "native-log", overwrite=True)
+```
+
+Exchange readers validate declarations, values, timestamps, relationships, and
+identifiers by default. Use `validation="warn"` to recover usable data while
+emitting warnings, or `validation="none"` for trusted inputs.
+
+`OCEL.open(...)` is the class-level equivalent of `open_ocel(...)`:
 
 ```python
 from oceldb import OCEL
 
-ocel = OCEL.read("converted-log")
+ocel = OCEL.open("converted-log")
 ```
 
-Use `read_sqlite(...)` for an OCEL 2.0 SQLite export. The first call converts
-the SQLite file to a native Parquet directory under the OS cache directory.
-Repeated reads reuse the cache while the source path, file size, and modified
-time stay unchanged.
+SQLite is import-only because it cannot produce Polars lazy frames directly.
+Import it into native storage, then open that dataset:
 
 ```python
-from oceldb.io import read_sqlite
+from oceldb.io import import_sqlite
 
-ocel = read_sqlite("source.sqlite")
+import_sqlite("source.sqlite", "converted-log", overwrite=True)
+ocel = OCEL.open("converted-log")
 ```
 
-Use `convert_sqlite(...)` when you want to persist the converted directory
-yourself:
-
-```python
-from oceldb.io import convert_sqlite
-
-convert_sqlite("source.sqlite", "converted-log", overwrite=True)
-ocel = OCEL.read("converted-log")
-```
-
-`read_json`, `read_xml`, and `read_pm4py` build an **in-memory** `OCEL` from the
+`read_json`, `read_xml`, and `from_pm4py` build an **in-memory** `OCEL` from the
 standard OCEL 2.0 exchange formats:
 
 ```python
-from oceldb.io import read_json, read_xml, read_pm4py
+from oceldb.io import from_pm4py, read_json, read_xml
 
 ocel = read_json("log.jsonocel")
 ocel = read_xml("log.xmlocel")
 
 import pm4py
-ocel = read_pm4py(pm4py.read_ocel2_xml("log.xmlocel"))  # OCEL 2.0 only
+ocel = from_pm4py(pm4py.read_ocel2_xml("log.xmlocel"))  # OCEL 2.0 only
 ```
 
-These parse the whole file into memory. For very large logs prefer
-`read_sqlite`, which produces file-backed lazy frames instead.
+These parse the whole file into memory. For larger logs, use `import_ocel()` or
+the format-specific importers to produce file-backed native frames.
 
 ## The OCEL API
 
@@ -334,24 +353,48 @@ summary.events, summary.event_types, summary.start_time, summary.end_time
 
 ## Exporting
 
-Write the native Parquet layout, or export to an interchange format:
+Use `export_ocel(...)` when the operation is specifically native-to-exchange.
+It accepts either an `OCEL` or the path of a native dataset:
 
 ```python
-from oceldb.io import write_sqlite, write_xes
+from oceldb.io import export_ocel
+
+export_ocel(ocel, "out.jsonocel")
+export_ocel("native-log", "out.xmlocel")
+export_ocel("native-log", "out.sqlite")
+```
+
+JSON, XML, and SQLite exports retain declared types, attribute schemas, object
+changes, E2O/O2O qualifiers, and time-valued attributes. The format-specific
+writers remain available:
+
+```python
+from oceldb.io import write_json, write_sqlite, write_xes, write_xml
 from oceldb.transformations import flatten
 
 ocel.write("my-log", overwrite=True)                # native Parquet directory
+write_json(ocel, "out.jsonocel", overwrite=True)    # OCEL 2.0 JSON
+write_xml(ocel, "out.xmlocel", overwrite=True)      # OCEL 2.0 XML
 write_sqlite(ocel, "out.sqlite", overwrite=True)    # OCEL 2.0 SQLite
 write_xes(ocel >> flatten("order"), "orders.xes")   # a flattened log to XES
 ```
 
-`write_sqlite` produces a standard OCEL 2.0 SQLite database (readable again with
-`read_sqlite` or any OCEL 2.0 tool). `write_xes` takes the output of `flatten`.
+`write_xes` takes the output of `flatten`; `case:*` columns become trace
+attributes and the remaining columns become event attributes. Codec
+capabilities are inspectable through `exchange_codecs()`; `XES_CAPABILITIES`
+explicitly records that XES requires a case notion and is not a lossless OCEL
+encoding.
+
+OCEL 2.0 formats declare event and object attribute types independently from
+their instances. Exchange readers preserve this information as `ocel.schema`.
+Manually constructed logs can provide an `OCELSchema`; when it is omitted,
+writers infer declarations from observed Polars columns.
 
 ## Manual Construction
 
-You can build an `OCEL` directly from Polars lazy frames. The constructor trusts
-the supplied schema and does not validate dangling relations or sort rows.
+You can build an `OCEL` from explicitly named Polars lazy frames with
+`OCEL.from_frames()`. It trusts the supplied schema and does not validate
+dangling relations or sort rows.
 
 ```python
 from datetime import datetime
@@ -402,7 +445,13 @@ o2o = pl.DataFrame(
     }
 ).lazy()
 
-ocel = OCEL(events, objects, object_changes, o2o, e2o)
+ocel = OCEL.from_frames(
+    events=events,
+    objects=objects,
+    object_changes=object_changes,
+    event_object=e2o,
+    object_object=o2o,
+)
 ocel.write("manual-log", overwrite=True)
 ```
 
@@ -410,6 +459,7 @@ ocel.write("manual-log", overwrite=True)
 
 ```text
 my-log/
+  manifest.json
   events/
     ocel_type=Place%20Order/
       data.parquet
@@ -428,6 +478,25 @@ re-attached when reading, so per-type Parquet files only store ids, timestamps,
 relation fields, and custom attributes.
 
 ## Development
+
+The package root intentionally contains only the public `OCEL` implementation
+and exports. Supporting code is grouped by responsibility:
+
+```text
+src/oceldb/
+  ocel.py
+  schema/          # column constants and declared OCEL type metadata
+  core/            # frame, state, inspection, SQL, and pruning services
+  io/
+    native/        # manifested Parquet storage and batch writing
+    exchange/      # lossless codec operations supported by each format
+    integrations/  # optional third-party bridges such as PM4Py
+    exports/       # derived/lossy formats such as XES
+  validation/      # integrity reports and repairs
+  filters/
+  transformations/
+  utils/
+```
 
 ```bash
 uv run ruff check .

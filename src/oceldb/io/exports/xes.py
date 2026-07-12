@@ -6,6 +6,9 @@ from typing import IO
 
 import polars as pl
 
+from oceldb.io._paths import atomic_file
+from oceldb.io._values import encode_scalar
+
 
 def write_xes(
     log: pl.LazyFrame | pl.DataFrame,
@@ -20,9 +23,9 @@ def write_xes(
     row becomes an ``<event>``. Column types are mapped to XES attribute
     types (``string``, ``date``, ``float``, ``int``, ``boolean``).
 
-    Writes the file incrementally — only one row is held in Python memory
-    at a time — so large flattened logs do not require extra RAM beyond
-    what Polars already uses internally.
+    The input is materialized and sorted once, then the XML is emitted one row
+    at a time. The flattened Polars frame must therefore fit in memory, while
+    XML construction itself adds only constant memory overhead.
 
     Args:
         log: A flattened log, typically produced by
@@ -40,12 +43,6 @@ def write_xes(
         >>> write_xes(ocel >> flatten("order"), "orders.xes")
         >>> write_xes(ocel >> flatten("order"), "orders.xes", overwrite=True)
     """
-    path = Path(path)
-    if path.exists() and not overwrite:
-        raise FileExistsError(
-            f"File already exists: {path}. Pass overwrite=True to replace it."
-        )
-
     df = log.collect() if isinstance(log, pl.LazyFrame) else log
 
     sort_cols = ["case:concept:name", "time:timestamp"]
@@ -54,31 +51,40 @@ def write_xes(
     df = df.sort(sort_cols)
 
     schema = df.schema
-    event_cols = [c for c in df.columns if c != "case:concept:name"]
+    case_cols = [c for c in df.columns if c.startswith("case:")]
+    event_cols = [c for c in df.columns if c not in case_cols]
 
-    with open(path, "w", encoding="utf-8") as f:
-        _write_header(f)
-        current_case: str | None = None
-        for row in df.iter_rows(named=True):
-            case = str(row["case:concept:name"])
-            if case != current_case:
-                if current_case is not None:
-                    f.write("  </trace>\n")
-                f.write("  <trace>\n")
-                f.write(f'    <string key="concept:name" value="{_x(case)}"/>\n')
-                current_case = case
-            f.write("    <event>\n")
-            for col in event_cols:
-                val = row[col]
-                if val is None:
-                    continue
-                xtype = _xes_type(schema[col])
-                xval = _xes_value(val, schema[col])
-                f.write(f'      <{xtype} key="{_x(col)}" value="{_x(xval)}"/>\n')
-            f.write("    </event>\n")
-        if current_case is not None:
-            f.write("  </trace>\n")
-        f.write("</log>\n")
+    with atomic_file(path, overwrite=overwrite) as (_, staging):
+        with staging.open("w", encoding="utf-8") as f:
+            _write_header(f)
+            current_case: str | None = None
+            for row in df.iter_rows(named=True):
+                case = str(row["case:concept:name"])
+                if case != current_case:
+                    if current_case is not None:
+                        f.write("  </trace>\n")
+                    f.write("  <trace>\n")
+                    f.write(f'    <string key="concept:name" value="{_x(case)}"/>\n')
+                    for col in case_cols:
+                        if col == "case:concept:name" or row[col] is None:
+                            continue
+                        key = col.removeprefix("case:")
+                        xtype = _xes_type(schema[col])
+                        xval = _xes_value(row[col])
+                        f.write(f'    <{xtype} key="{_x(key)}" value="{_x(xval)}"/>\n')
+                    current_case = case
+                f.write("    <event>\n")
+                for col in event_cols:
+                    val = row[col]
+                    if val is None:
+                        continue
+                    xtype = _xes_type(schema[col])
+                    xval = _xes_value(val)
+                    f.write(f'      <{xtype} key="{_x(col)}" value="{_x(xval)}"/>\n')
+                f.write("    </event>\n")
+            if current_case is not None:
+                f.write("  </trace>\n")
+            f.write("</log>\n")
 
 
 def _write_header(f: IO[str]) -> None:
@@ -107,12 +113,8 @@ def _xes_type(dtype: pl.DataType) -> str:
     return "string"
 
 
-def _xes_value(val: object, dtype: pl.DataType) -> str:
-    if isinstance(dtype, pl.Boolean):
-        return "true" if val else "false"
-    if hasattr(val, "isoformat"):
-        return val.isoformat()
-    return str(val)
+def _xes_value(val: object) -> str:
+    return str(encode_scalar(val, style="xes"))
 
 
 def _x(s: str) -> str:

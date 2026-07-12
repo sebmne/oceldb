@@ -40,11 +40,11 @@ def prune_log(
     """
     kept_ids = objects.select(s.OCEL_ID)
     kept_object_ids = kept_ids.rename({s.OCEL_ID: s.OCEL_OBJECT_ID})
-    return OCEL(
+    return OCEL.from_frames(
         events=events,
         objects=objects,
         object_changes=ocel.object_changes().join(kept_ids, on=s.OCEL_ID, how="semi"),
-        o2o=ocel.object_object()
+        object_object=ocel.object_object()
         .join(
             kept_object_ids,
             left_on=s.OCEL_SOURCE_ID,
@@ -57,5 +57,46 @@ def prune_log(
             right_on=s.OCEL_OBJECT_ID,
             how="semi",
         ),
-        e2o=e2o,
+        event_object=e2o,
+        schema=ocel.schema,
+        metadata=ocel.metadata,
     )
+
+
+def sublog_from_relations(
+    ocel: OCEL,
+    relations: pl.LazyFrame,
+    *,
+    events: pl.LazyFrame | None = None,
+) -> OCEL:
+    """Build the connected sub-log induced by surviving E2O *relations*.
+
+    Passing *events* preserves selected events without relations. This is useful
+    for event predicates and zero-count filters; otherwise both sides are
+    derived from the surviving relations.
+    """
+    kept_events = relations.select(s.OCEL_EVENT_ID).unique()
+    kept_objects = relations.select(s.OCEL_OBJECT_ID).unique()
+    if events is None:
+        events = ocel.events().join(
+            kept_events, left_on=s.OCEL_ID, right_on=s.OCEL_EVENT_ID, how="semi"
+        )
+    objects = ocel.objects().join(
+        kept_objects, left_on=s.OCEL_ID, right_on=s.OCEL_OBJECT_ID, how="semi"
+    )
+    return prune_log(ocel, events=events, objects=objects, e2o=relations)
+
+
+def sublog_from_event_ids(ocel: OCEL, event_ids: pl.LazyFrame) -> OCEL:
+    """Build a sub-log from an ``ocel_event_id`` frame."""
+    relations = ocel.event_object().join(event_ids, on=s.OCEL_EVENT_ID, how="semi")
+    events = ocel.events().join(
+        event_ids, left_on=s.OCEL_ID, right_on=s.OCEL_EVENT_ID, how="semi"
+    )
+    return sublog_from_relations(ocel, relations, events=events)
+
+
+def sublog_from_object_ids(ocel: OCEL, object_ids: pl.LazyFrame) -> OCEL:
+    """Build the connected sub-log induced by an ``ocel_object_id`` frame."""
+    relations = ocel.event_object().join(object_ids, on=s.OCEL_OBJECT_ID, how="semi")
+    return sublog_from_relations(ocel, relations)

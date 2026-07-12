@@ -1,193 +1,113 @@
-"""User-facing OCEL handle built from five lazy Polars tables.
+"""The user-facing OCEL façade over five lazy Polars tables."""
 
-The :class:`OCEL` class represents an OCEL 2.0 log as lazy dataframe views. It
-does not own a database connection and it does not materialize data until the
-caller executes a Polars action such as :meth:`polars.LazyFrame.collect`.
-
-The constructor trusts that the supplied frames already follow the oceldb
-schema:
-
-* ``events``: ``ocel_id``, ``ocel_time``, ``ocel_type``, and event attributes.
-* ``objects``: ``ocel_id`` and ``ocel_type``.
-* ``object_changes``: ``ocel_id``, ``ocel_time``, ``ocel_type``,
-  ``ocel_changed_field``, and object attributes.
-* ``e2o``: ``ocel_event_id``, ``ocel_event_type``, ``ocel_object_id``,
-  ``ocel_object_type``, and ``ocel_qualifier``.
-* ``o2o``: ``ocel_source_id``, ``ocel_source_type``, ``ocel_target_id``,
-  ``ocel_target_type``, and ``ocel_qualifier``.
-"""
-
-import html
-from collections.abc import Callable, Iterable, Sequence
-from dataclasses import dataclass
-from datetime import datetime
+from collections.abc import Callable, Mapping
 from pathlib import Path
-from typing import TypeVar, cast
+from typing import Any, TypeVar
 import polars as pl
 
 from oceldb import schema as s
-from oceldb.store import read_frames, write_frames
+from oceldb.core.dataset import OCELDataset, OCELFrames
+from oceldb.core.frames import concat_unique, reconstruct_object_states, select_types
+from oceldb.core.inspection import (
+    OCELSummary,
+    describe_frames,
+    html_repr,
+    text_repr,
+)
+from oceldb.core.sql import execute_sql
+from oceldb.schema import OCELSchema
 
 _T = TypeVar("_T")
-
-
-_TYPE_PREVIEW_LIMIT = 6
-
-
-@dataclass(frozen=True)
-class _Overview:
-    events: int
-    objects: int
-    object_changes: int
-    e2o: int
-    o2o: int
-    event_types: list[str]
-    object_types: list[str]
-
-
-@dataclass(frozen=True)
-class OCELSummary:
-    """Summary statistics for an :class:`OCEL`, returned by :meth:`OCEL.describe`.
-
-    ``event_types`` and ``object_types`` map each type name to its row count in
-    the ``events`` / ``objects`` tables. ``start_time`` and ``end_time`` are the
-    earliest and latest ``ocel_time`` across events, or ``None`` for an empty
-    log.
-    """
-
-    events: int
-    objects: int
-    object_changes: int
-    e2o: int
-    o2o: int
-    event_types: dict[str, int]
-    object_types: dict[str, int]
-    start_time: datetime | None
-    end_time: datetime | None
 
 
 class OCEL:
     """An OCEL 2.0 log exposed as lazy Polars dataframes.
 
-    Create an ``OCEL`` from existing ``pl.LazyFrame`` objects when your data is
-    already in memory or opened through another Polars scanner. Use
-    :meth:`read` when the log has already been written in oceldb's native
-    Parquet layout.
-
-    The object is intentionally lightweight: accessor methods return the stored
-    lazy frames or lazy transformations of them. They do not validate referential
-    integrity and they do not execute queries until you call ``collect()``,
-    ``sink_parquet()``, or another Polars execution method.
-
-    Examples:
-        >>> from oceldb import OCEL
-        >>> ocel = OCEL.read("converted-log")
-        >>> counts = (
-        ...     ocel.events()
-        ...     .group_by("ocel_type")
-        ...     .len()
-        ...     .collect()
-        ... )
-        >>> order_events = ocel.events("Place Order", "Pay Order")
+    The constructor trusts its input schemas and performs no integrity checks.
+    Accessors remain lazy except for the presence query used to omit all-null
+    attributes from type-specific event and change views.
     """
 
-    __slots__ = ("_events", "_objects", "_object_changes", "_o2o", "_e2o")
+    __slots__ = ("_dataset",)
 
-    def __init__(
-        self,
+    def __init__(self, dataset: OCELDataset) -> None:
+        """Build the user-facing façade over a canonical dataset."""
+        self._dataset = dataset
+
+    @classmethod
+    def from_frames(
+        cls,
+        *,
         events: pl.LazyFrame,
         objects: pl.LazyFrame,
         object_changes: pl.LazyFrame,
-        o2o: pl.LazyFrame,
-        e2o: pl.LazyFrame,
-    ) -> None:
-        """Build an ``OCEL`` from its five logical tables.
+        event_object: pl.LazyFrame,
+        object_object: pl.LazyFrame,
+        schema: OCELSchema | None = None,
+        metadata: Mapping[str, Any] | None = None,
+    ) -> "OCEL":
+        """Build a canonical dataset from five explicitly named lazy frames.
 
-        Args:
-            events: Lazy frame containing event rows. Required columns are
-                ``ocel_id``, ``ocel_time``, and ``ocel_type``; any additional
-                columns are treated as event attributes.
-            objects: Lazy frame containing object identities with ``ocel_id``
-                and ``ocel_type``.
-            object_changes: Lazy frame containing sparse object attribute
-                changes. Required columns are ``ocel_id``, ``ocel_time``,
-                ``ocel_type``, and ``ocel_changed_field``; any additional
-                columns are treated as object attributes.
-            o2o: Lazy frame containing object-to-object relations.
-            e2o: Lazy frame containing event-to-object relations.
-
-        Notes:
-            The constructor is deliberately zero-copy and lazy. It does not
-            check schemas, sort rows, drop dangling relations, or collect any
-            frame. Validate or normalize data before constructing ``OCEL`` if
-            those guarantees matter for your application.
+        ``schema`` preserves declared types and all-null attributes during
+        exchange; writers infer it from observed values when omitted.
         """
-        self._events = events
-        self._objects = objects
-        self._object_changes = object_changes
-        self._o2o = o2o
-        self._e2o = e2o
+        return cls(
+            OCELDataset(
+                frames=OCELFrames(
+                    events=events,
+                    objects=objects,
+                    object_changes=object_changes,
+                    event_object=event_object,
+                    object_object=object_object,
+                ),
+                schema=schema,
+                metadata=metadata or {},
+            ),
+        )
+
+    @property
+    def dataset(self) -> OCELDataset:
+        """The canonical typed dataset backing this façade."""
+        return self._dataset
+
+    @property
+    def schema(self) -> OCELSchema | None:
+        """Declared type metadata, or ``None`` when it must be inferred."""
+        return self._dataset.schema
+
+    @property
+    def metadata(self) -> Mapping[str, Any]:
+        """Read-only native dataset metadata."""
+        return self._dataset.metadata
 
     def events(self, *types: str) -> pl.LazyFrame:
-        """Return events, optionally restricted to selected event types.
+        """Return events, optionally filtered by type.
 
-        Args:
-            *types: Event type names to keep. When omitted, all events and all
-                event attribute columns are returned.
-
-        Returns:
-            A lazy frame with ``ocel_id``, ``ocel_time``, event attributes, and
-            ``ocel_type``. When ``types`` are provided, attribute columns that
-            are entirely null for the selected event types are omitted so the
-            result is easier to inspect and write.
-
-        Examples:
-            >>> ocel.events().select("ocel_id", "ocel_type").collect()
-            >>> ocel.events("Place Order", "Pay Order").sort("ocel_time")
+        Type-specific views omit attributes that are entirely null.
         """
         if not types:
-            return self._events
-        return _select_types(self._events, types, (s.OCEL_ID, s.OCEL_TIME))
+            return self._dataset.frames.events
+        return select_types(
+            self._dataset.frames.events, types, (s.OCEL_ID, s.OCEL_TIME)
+        )
 
     def objects(self, *types: str) -> pl.LazyFrame:
-        """Return object identities, optionally restricted to object types.
-
-        Args:
-            *types: Object type names to keep. When omitted, all objects are
-                returned.
-
-        Returns:
-            A lazy frame with ``ocel_id`` and ``ocel_type``.
-
-        Examples:
-            >>> all_objects = ocel.objects()
-            >>> orders = ocel.objects("order")
-        """
+        """Return object identities, optionally filtered by type."""
         if not types:
-            return self._objects
-        return self._objects.filter(pl.col(s.OCEL_TYPE).is_in(list(types)))
+            return self._dataset.frames.objects
+        return self._dataset.frames.objects.filter(
+            pl.col(s.OCEL_TYPE).is_in(list(types))
+        )
 
     def object_changes(self, *types: str) -> pl.LazyFrame:
-        """Return raw sparse object attribute changes.
+        """Return sparse attribute changes, optionally filtered by object type.
 
-        Args:
-            *types: Object type names to keep. When omitted, all object change
-                rows and all object attribute columns are returned.
-
-        Returns:
-            A lazy frame with ``ocel_id``, ``ocel_time``,
-            ``ocel_changed_field``, object attribute columns, and
-            ``ocel_type``. When ``types`` are provided, attributes that are
-            entirely null for those types are omitted.
-
-        Notes:
-            This is the source change log. Use :meth:`object_states` when you
-            need point-in-time object states with values carried forward.
+        Use :meth:`object_states` for forward-filled point-in-time states.
         """
         if not types:
-            return self._object_changes
-        return _select_types(
-            self._object_changes,
+            return self._dataset.frames.object_changes
+        return select_types(
+            self._dataset.frames.object_changes,
             types,
             (s.OCEL_ID, s.OCEL_TIME, s.OCEL_CHANGED_FIELD),
         )
@@ -195,162 +115,36 @@ class OCEL:
     def object_states(self, *types: str) -> pl.LazyFrame:
         """Return reconstructed object states from sparse change rows.
 
-        Args:
-            *types: Object type names to keep. When omitted, states for all
-                object types are returned.
-
-        Returns:
-            A lazy frame with one row per object and change timestamp:
-            ``ocel_id``, ``ocel_time``, forward-filled object attributes,
-            ``ocel_event_id``, ``ocel_event_type``, and ``ocel_type``. Attribute
-            values are carried forward per ``(ocel_type, ocel_id)`` from the most
-            recent non-null value. The result is sorted by ``ocel_type``,
-            ``ocel_id``, and ``ocel_time``.
-
-        Notes:
-            OCEL 2.0 objects change only through events, so each change row is
-            stamped with the event that caused it (the event linked via E2O at
-            the same timestamp): ``ocel_event_id`` / ``ocel_event_type``. The
-            synthetic initial-state row at the epoch has no causing event and
-            leaves both null; when an object is in several events at one instant
-            the smallest ``ocel_event_id`` is chosen. This event-stamped state
-            history is the basis for temporal filters and for flattening.
-
-        Examples:
-            >>> states = ocel.object_states("order")
-            >>> # the order's attributes at the moment it was paid
-            >>> paid = states.filter(pl.col("ocel_event_type") == "Pay Order")
-            >>> latest = (
-            ...     states
-            ...     .sort("ocel_type", "ocel_id", "ocel_time")
-            ...     .unique(subset=["ocel_type", "ocel_id"], keep="last")
-            ...     .collect()
-            ... )
+        Values are carried forward per object. Each timestamp is enriched with
+        the matching E2O event; deterministic ID order resolves simultaneous
+        events, while synthetic epoch states have no causing event.
         """
-        states, attrs = self._forward_filled_states(types)
-        enriched = states.join(
-            self._causing_events(types),
-            left_on=[s.OCEL_ID, s.OCEL_TIME],
-            right_on=[s.OCEL_OBJECT_ID, s.OCEL_TIME],
-            how="left",
-        )
-        return enriched.select(
-            s.OCEL_ID,
-            s.OCEL_TIME,
-            *attrs,
-            s.OCEL_EVENT_ID,
-            s.OCEL_EVENT_TYPE,
-            s.OCEL_TYPE,
-        ).sort(s.OCEL_TYPE, s.OCEL_ID, s.OCEL_TIME)
-
-    def _forward_filled_states(
-        self, types: tuple[str, ...]
-    ) -> tuple[pl.LazyFrame, list[str]]:
-        """Per-object state history with attributes carried forward.
-
-        Returns the forward-filled state frame (``ocel_type``, ``ocel_id``,
-        ``ocel_time``, attributes — one row per object and change timestamp) and
-        the list of attribute columns kept for *types*.
-        """
-        frame = self._object_changes
-        core = (s.OCEL_ID, s.OCEL_TIME, s.OCEL_CHANGED_FIELD)
-        candidates = _attribute_columns(frame, core)
-        if types:
-            frame = frame.filter(pl.col(s.OCEL_TYPE).is_in(list(types)))
-            attrs = _present(frame, candidates)
-        else:
-            attrs = candidates
-        keys = [s.OCEL_TYPE, s.OCEL_ID, s.OCEL_TIME]
-        if not attrs:
-            return frame.select(keys).unique(), attrs
-        collapsed = frame.group_by(keys).agg(
-            pl.col(attr).drop_nulls().last().alias(attr) for attr in attrs
-        )
-        states = collapsed.with_columns(
-            pl.col(attr)
-            .forward_fill()
-            .over([s.OCEL_TYPE, s.OCEL_ID], order_by=s.OCEL_TIME)
-            for attr in attrs
-        )
-        return states, attrs
-
-    def _causing_events(self, types: tuple[str, ...]) -> pl.LazyFrame:
-        """Map each ``(object, timestamp)`` to the event that changed it there.
-
-        OCEL 2.0 objects change only through events, so a change at time ``T``
-        for object ``O`` corresponds to the event linked to ``O`` via E2O whose
-        timestamp is ``T``. If several events share that instant, the smallest
-        ``ocel_event_id`` is kept so the result is deterministic.
-        """
-        e2o = self._e2o
-        if types:
-            e2o = e2o.filter(pl.col(s.OCEL_OBJECT_TYPE).is_in(list(types)))
-        return (
-            e2o.select(s.OCEL_OBJECT_ID, s.OCEL_EVENT_ID, s.OCEL_EVENT_TYPE)
-            .join(
-                self._events.select(s.OCEL_ID, s.OCEL_TIME),
-                left_on=s.OCEL_EVENT_ID,
-                right_on=s.OCEL_ID,
-                how="inner",
-            )
-            .sort(s.OCEL_EVENT_ID)
-            .unique(
-                subset=[s.OCEL_OBJECT_ID, s.OCEL_TIME],
-                keep="first",
-                maintain_order=True,
-            )
+        return reconstruct_object_states(
+            self._dataset.frames.object_changes,
+            self._dataset.frames.events,
+            self._dataset.frames.event_object,
+            types,
         )
 
     def event_object(self) -> pl.LazyFrame:
-        """Return event-to-object relations.
-
-        Returns:
-            A lazy frame with ``ocel_event_id``, ``ocel_event_type``,
-            ``ocel_object_id``, ``ocel_object_type``, and ``ocel_qualifier``.
-
-        Examples:
-            >>> order_links = ocel.event_object().filter(
-            ...     pl.col("ocel_object_type") == "order"
-            ... )
-        """
-        return self._e2o
+        """Return event-to-object relations."""
+        return self._dataset.frames.event_object
 
     def object_object(self) -> pl.LazyFrame:
-        """Return object-to-object relations.
-
-        Returns:
-            A lazy frame with ``ocel_source_id``, ``ocel_source_type``,
-            ``ocel_target_id``, ``ocel_target_type``, and ``ocel_qualifier``.
-            Logs without O2O data return an empty lazy frame with these columns.
-        """
-        return self._o2o
+        """Return object-to-object relations."""
+        return self._dataset.frames.object_object
 
     def describe(self) -> OCELSummary:
-        """Compute summary statistics for the log.
+        """Materialize row/type counts and event time bounds.
 
-        Returns:
-            An :class:`OCELSummary` with row counts for each of the five tables,
-            per-type event and object counts, and the earliest and latest event
-            timestamps. This is the programmatic counterpart to the log's
-            ``repr``; every value is materialized, so calling it executes the
-            underlying scans.
-
-        Examples:
-            >>> summary = ocel.describe()
-            >>> summary.events
-            >>> summary.event_types["Pay Order"]
-            >>> summary.start_time, summary.end_time
+        This is the programmatic counterpart to the text representation.
         """
-        return OCELSummary(
-            events=_count(self._events),
-            objects=_count(self._objects),
-            object_changes=_count(self._object_changes),
-            e2o=_count(self._e2o),
-            o2o=_count(self._o2o),
-            event_types=_type_counts(self._events),
-            object_types=_type_counts(self._objects),
-            start_time=_time_bound(self._events, descending=False),
-            end_time=_time_bound(self._events, descending=True),
+        return describe_frames(
+            self._dataset.frames.events,
+            self._dataset.frames.objects,
+            self._dataset.frames.object_changes,
+            self._dataset.frames.event_object,
+            self._dataset.frames.object_object,
         )
 
     def __rshift__(self, step: Callable[["OCEL"], _T]) -> _T:
@@ -358,297 +152,81 @@ class OCEL:
         return step(self)
 
     def __repr__(self) -> str:
-        overview = self._overview()
-        return (
-            "OCEL\n"
-            f"  events:         {_rows(overview.events)} | "
-            f"{_types(overview.event_types)}\n"
-            f"  objects:        {_rows(overview.objects)} | "
-            f"{_types(overview.object_types)}\n"
-            f"  object changes: {_rows(overview.object_changes)}\n"
-            f"  relations:      E2O: {_rows(overview.e2o)} | "
-            f"O2O: {_rows(overview.o2o)}"
+        return text_repr(
+            self._dataset.frames.events,
+            self._dataset.frames.objects,
+            self._dataset.frames.object_changes,
+            self._dataset.frames.event_object,
+            self._dataset.frames.object_object,
         )
 
     def _repr_html_(self) -> str:
-        overview = self._overview()
-        counts = "".join(
-            f"<tr><th style='text-align:left'>{label}</th>"
-            f"<td style='text-align:right'>{value:,}</td></tr>"
-            for label, value in (
-                ("Events", overview.events),
-                ("Objects", overview.objects),
-                ("Object changes", overview.object_changes),
-                ("E2O relations", overview.e2o),
-                ("O2O relations", overview.o2o),
-            )
-        )
-        return (
-            "<div style='font-family:sans-serif'>"
-            "<strong>OCEL</strong>"
-            f"<table>{counts}</table>"
-            f"<div><em>Event types:</em> {_chips(overview.event_types)}</div>"
-            f"<div><em>Object types:</em> {_chips(overview.object_types)}</div>"
-            "</div>"
-        )
-
-    def _overview(self) -> _Overview:
-        return _Overview(
-            events=_count(self._events),
-            objects=_count(self._objects),
-            object_changes=_count(self._object_changes),
-            e2o=_count(self._e2o),
-            o2o=_count(self._o2o),
-            event_types=_distinct_types(self._events),
-            object_types=_distinct_types(self._objects),
+        return html_repr(
+            self._dataset.frames.events,
+            self._dataset.frames.objects,
+            self._dataset.frames.object_changes,
+            self._dataset.frames.event_object,
+            self._dataset.frames.object_object,
         )
 
     @classmethod
-    def read(cls, path: str | Path) -> "OCEL":
-        """Open an oceldb Parquet log directory.
+    def open(cls, path: str | Path) -> "OCEL":
+        """Open a native oceldb Parquet directory as lazy scans.
 
-        Args:
-            path: Directory written by :meth:`write`,
-                :func:`oceldb.store.write_frames`, or
-                :func:`oceldb.io.convert_sqlite`.
-
-        Returns:
-            An ``OCEL`` backed by lazy Polars scans of the Parquet files under
-            ``path``.
-
-        Notes:
-            This method reads oceldb's native directory layout. To open an OCEL
-            2.0 SQLite export directly, use
-            ``oceldb.io.read_sqlite("log.sqlite")`` or convert it first with
-            ``oceldb.io.convert_sqlite``.
-
-        Examples:
-            >>> ocel = OCEL.read("converted-log")
-            >>> ocel.events("Pay Order").collect()
+        Use :func:`oceldb.io.import_ocel` to persist an exchange file; the
+        format-specific readers are available for one-off in-memory reads.
         """
-        frames = read_frames(path)
-        return cls(
-            events=frames["events"],
-            objects=frames["objects"],
-            object_changes=frames["object_changes"],
-            o2o=frames["o2o"],
-            e2o=frames["e2o"],
-        )
+        from oceldb.io.native import open_native
+
+        return cls(open_native(path))
 
     @classmethod
     def merge(cls, *ocels: "OCEL") -> "OCEL":
-        """Combine several logs into one by taking the union of their tables.
+        """Lazily union logs and de-duplicate shared identifiers and rows.
 
-        Frames are concatenated column-wise aligned (attributes unique to one
-        log become null elsewhere). Events and objects are de-duplicated by
-        ``ocel_id`` keeping the first occurrence, so shared ids across logs are
-        not repeated; object changes and relations are de-duplicated on their
-        full rows. The inputs are treated as lazy, so no data is read until the
-        result is collected or written.
-
-        Args:
-            *ocels: One or more logs to merge. At least one is required.
-
-        Returns:
-            A new ``OCEL`` holding the union of the inputs.
-
-        Raises:
-            ValueError: If no logs are supplied.
-
-        Notes:
-            Merging assumes ids are globally meaningful: if two logs use the
-            same ``ocel_id`` for different real-world entities, relabel one side
-            first. Combining conflicting rows is not detected.
-
-        Examples:
-            >>> combined = OCEL.merge(ocel_a, ocel_b)
-            >>> combined = OCEL.merge(*monthly_logs)
+        IDs are assumed to be globally meaningful; conflicting entities with
+        the same ID are not detected. At least one log is required.
         """
         if not ocels:
             raise ValueError("merge requires at least one OCEL.")
-        return cls(
-            events=_concat_unique([o._events for o in ocels], subset=[s.OCEL_ID]),
-            objects=_concat_unique([o._objects for o in ocels], subset=[s.OCEL_ID]),
-            object_changes=_concat_unique(
-                [o._object_changes for o in ocels], subset=None
+        return cls.from_frames(
+            events=concat_unique(
+                [o.dataset.frames.events for o in ocels], subset=[s.OCEL_ID]
             ),
-            o2o=_concat_unique([o._o2o for o in ocels], subset=None),
-            e2o=_concat_unique([o._e2o for o in ocels], subset=None),
+            objects=concat_unique(
+                [o.dataset.frames.objects for o in ocels], subset=[s.OCEL_ID]
+            ),
+            object_changes=concat_unique(
+                [o.dataset.frames.object_changes for o in ocels], subset=None
+            ),
+            object_object=concat_unique(
+                [o.dataset.frames.object_object for o in ocels], subset=None
+            ),
+            event_object=concat_unique(
+                [o.dataset.frames.event_object for o in ocels], subset=None
+            ),
+            schema=OCELSchema.merge(*(o.schema for o in ocels if o.schema is not None))
+            if any(o.schema is not None for o in ocels)
+            else None,
         )
 
     def write(self, target: str | Path, *, overwrite: bool = False) -> None:
-        """Write this log to oceldb's native Parquet directory layout.
+        """Materialize and atomically write the native Parquet layout."""
+        from oceldb.io.native import write_native
 
-        Args:
-            target: Destination directory. The directory is created atomically
-                through a temporary sibling directory.
-            overwrite: Replace an existing file or directory at ``target`` when
-                ``True``. The default raises :class:`FileExistsError` instead.
-
-        Raises:
-            FileExistsError: If ``target`` already exists and ``overwrite`` is
-                ``False``.
-
-        Notes:
-            All lazy frames are collected during the write. The operation first
-            writes a complete temporary directory and then renames it into
-            place, so writing back to a directory currently being scanned is
-            safe once all input scans can still read their original files.
-        """
-        write_frames(
-            {
-                "events": self._events,
-                "objects": self._objects,
-                "object_changes": self._object_changes,
-                "e2o": self._e2o,
-                "o2o": self._o2o,
-            },
-            target,
-            overwrite=overwrite,
-        )
+        write_native(self._dataset, target, overwrite=overwrite)
 
     def sql(self, query: str) -> pl.DataFrame:
-        """Run a DuckDB SQL query over the log's tables.
+        """Execute DuckDB SQL over the five logical tables.
 
-        Opens a temporary in-memory DuckDB connection, registers the five
-        logical tables as views, runs *query*, and returns the result as a
-        Polars ``DataFrame``. The connection is closed before returning, so it is
-        a self-contained query rather than a long-lived session.
-
-        The registered views are the raw tables: ``events``, ``objects``,
-        ``object_changes``, ``event_object`` (E2O) and ``object_object`` (O2O).
-        DuckDB scans the underlying (parquet-backed) Polars frames directly;
-        only the tables the query references are materialized.
-
-        Args:
-            query: A DuckDB SQL statement referencing the registered views.
-
-        Returns:
-            The query result as an eager ``pl.DataFrame``.
-
-        Examples:
-            >>> ocel.sql(
-            ...     "SELECT ocel_type, count(*) AS n "
-            ...     "FROM events GROUP BY 1 ORDER BY n DESC"
-            ... )
-            >>> ocel.sql('''
-            ...     SELECT e.ocel_type, eo.ocel_object_type, count(*) AS n
-            ...     FROM events e
-            ...     JOIN event_object eo ON eo.ocel_event_id = e.ocel_id
-            ...     GROUP BY 1, 2
-            ... ''')
+        Views are named ``events``, ``objects``, ``object_changes``,
+        ``event_object``, and ``object_object``. The result is eager.
         """
-        import duckdb
-
-        connection = duckdb.connect()
-        try:
-            connection.register("events", self._events)
-            connection.register("objects", self._objects)
-            connection.register("object_changes", self._object_changes)
-            connection.register("event_object", self._e2o)
-            connection.register("object_object", self._o2o)
-            return connection.sql(query).pl()
-        finally:
-            connection.close()
-
-
-def _select_types(
-    frame: pl.LazyFrame, types: Sequence[str], core: tuple[str, ...]
-) -> pl.LazyFrame:
-    sub = frame.filter(pl.col(s.OCEL_TYPE).is_in(list(types)))
-    kept = _present(sub, _attribute_columns(frame, core))
-    return sub.select(*core, *kept, s.OCEL_TYPE)
-
-
-def _attribute_columns(frame: pl.LazyFrame, core: tuple[str, ...]) -> list[str]:
-    return [
-        name
-        for name in frame.collect_schema().names()
-        if name not in core and name != s.OCEL_TYPE
-    ]
-
-
-def _present(frame: pl.LazyFrame, candidates: list[str]) -> list[str]:
-    """Of *candidates*, the columns that hold at least one non-null value."""
-    if not candidates:
-        return []
-    row = frame.select(
-        pl.col(name).is_not_null().any().alias(name) for name in candidates
-    ).collect()
-    return [name for name in candidates if cast(bool, row.get_column(name).item())]
-
-
-def _count(frame: pl.LazyFrame) -> int:
-    return int(cast(int, frame.select(pl.len()).collect().item()))
-
-
-def _distinct_types(frame: pl.LazyFrame) -> list[str]:
-    values: Iterable[object] = (
-        frame.select(s.OCEL_TYPE)
-        .unique()
-        .collect()
-        .get_column(s.OCEL_TYPE)
-        .drop_nulls()
-        .sort()
-        .to_list()
-    )
-    return [str(value) for value in values]
-
-
-def _type_counts(frame: pl.LazyFrame) -> dict[str, int]:
-    df = (
-        frame.select(s.OCEL_TYPE)
-        .drop_nulls()
-        .group_by(s.OCEL_TYPE)
-        .len()
-        .sort(s.OCEL_TYPE)
-        .collect()
-    )
-    return {
-        str(name): int(cast(int, count))
-        for name, count in zip(
-            df.get_column(s.OCEL_TYPE).to_list(), df.get_column("len").to_list()
+        return execute_sql(
+            query,
+            events=self._dataset.frames.events,
+            objects=self._dataset.frames.objects,
+            object_changes=self._dataset.frames.object_changes,
+            e2o=self._dataset.frames.event_object,
+            o2o=self._dataset.frames.object_object,
         )
-    }
-
-
-def _time_bound(frame: pl.LazyFrame, *, descending: bool) -> datetime | None:
-    column = pl.col(s.OCEL_TIME)
-    agg = column.max() if descending else column.min()
-    value = frame.select(agg.alias("bound")).collect().item()
-    return cast("datetime | None", value)
-
-
-def _concat_unique(
-    frames: list[pl.LazyFrame], *, subset: list[str] | None
-) -> pl.LazyFrame:
-    combined = pl.concat(frames, how="diagonal_relaxed")
-    if subset is None:
-        return combined.unique(maintain_order=True)
-    return combined.unique(subset=subset, keep="first", maintain_order=True)
-
-
-def _rows(count: int) -> str:
-    return f"{count:,} row" if count == 1 else f"{count:,} rows"
-
-
-def _types(values: list[str]) -> str:
-    count = len(values)
-    label = "type" if count == 1 else "types"
-    return f"{count} {label} {_preview(values)}"
-
-
-def _preview(values: Sequence[str]) -> str:
-    if not values:
-        return "[]"
-    visible = [repr(value) for value in values[:_TYPE_PREVIEW_LIMIT]]
-    remaining = len(values) - len(visible)
-    if remaining:
-        visible.append(f"... +{remaining} more")
-    return "[" + ", ".join(visible) + "]"
-
-
-def _chips(values: list[str]) -> str:
-    if not values:
-        return "<em>none</em>"
-    return ", ".join(html.escape(value) for value in values)

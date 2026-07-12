@@ -6,37 +6,19 @@ selection and prunes the connected core; ``filter_o2o_by_qualifier`` only trims
 O2O edges, since O2O relations do not decide which events or objects exist.
 """
 
-from collections.abc import Callable, Iterable
-from typing import Literal, overload
+from collections.abc import Iterable
+from typing import Literal
 
 import polars as pl
 
 from oceldb import schema as s
-from oceldb.utils import to_list
-from oceldb.utils._step import _step
-from oceldb.filters._utils import _scoped_match
-from oceldb.pruning import prune_log
+from oceldb.utils.step import step
+from oceldb.core.pruning import sublog_from_relations
+from oceldb.filters._utils import normalize_scope, scoped_match
 from oceldb.ocel import OCEL
 
 
-@overload
-def filter_e2o_by_qualifier(
-    ocel: OCEL,
-    *qualifiers: str,
-    object_types: str | Iterable[str] | None = ...,
-    mode: Literal["include", "exclude"] = ...,
-) -> OCEL: ...
-
-
-@overload
-def filter_e2o_by_qualifier(
-    *qualifiers: str,
-    object_types: str | Iterable[str] | None = ...,
-    mode: Literal["include", "exclude"] = ...,
-) -> Callable[[OCEL], OCEL]: ...
-
-
-@_step
+@step
 def filter_e2o_by_qualifier(
     ocel: OCEL,
     *qualifiers: str,
@@ -63,46 +45,18 @@ def filter_e2o_by_qualifier(
         >>> sub = filter_e2o_by_qualifier(ocel, "sends", "receives")
         >>> sub = ocel >> filter_e2o_by_qualifier("blocks", mode="exclude")
     """
-    scope = to_list(object_types) if object_types is not None else None
-    keep = _scoped_match(
+    scope = normalize_scope(object_types)
+    keep = scoped_match(
         pl.col(s.OCEL_QUALIFIER).is_in(list(qualifiers)),
         type_col=s.OCEL_OBJECT_TYPE,
         scope=scope,
         mode=mode,
     )
     relations = ocel.event_object().filter(keep)
-    kept_events = relations.select(s.OCEL_EVENT_ID).unique()
-    kept_objects = relations.select(s.OCEL_OBJECT_ID).unique()
-    return prune_log(
-        ocel,
-        events=ocel.events().join(
-            kept_events, left_on=s.OCEL_ID, right_on=s.OCEL_EVENT_ID, how="semi"
-        ),
-        objects=ocel.objects().join(
-            kept_objects, left_on=s.OCEL_ID, right_on=s.OCEL_OBJECT_ID, how="semi"
-        ),
-        e2o=relations,
-    )
+    return sublog_from_relations(ocel, relations)
 
 
-@overload
-def filter_o2o_by_qualifier(
-    ocel: OCEL,
-    *qualifiers: str,
-    object_types: str | Iterable[str] | None = ...,
-    mode: Literal["include", "exclude"] = ...,
-) -> OCEL: ...
-
-
-@overload
-def filter_o2o_by_qualifier(
-    *qualifiers: str,
-    object_types: str | Iterable[str] | None = ...,
-    mode: Literal["include", "exclude"] = ...,
-) -> Callable[[OCEL], OCEL]: ...
-
-
-@_step
+@step
 def filter_o2o_by_qualifier(
     ocel: OCEL,
     *qualifiers: str,
@@ -137,15 +91,18 @@ def filter_o2o_by_qualifier(
     if object_types is None:
         keep = decision
     else:
-        scope = to_list(object_types)
+        scope = normalize_scope(object_types)
+        assert scope is not None
         in_scope = pl.col(s.OCEL_SOURCE_TYPE).is_in(scope) | pl.col(
             s.OCEL_TARGET_TYPE
         ).is_in(scope)
         keep = (~in_scope) | decision
-    return OCEL(
+    return OCEL.from_frames(
         events=ocel.events(),
         objects=ocel.objects(),
         object_changes=ocel.object_changes(),
-        o2o=ocel.object_object().filter(keep),
-        e2o=ocel.event_object(),
+        object_object=ocel.object_object().filter(keep),
+        event_object=ocel.event_object(),
+        schema=ocel.schema,
+        metadata=ocel.metadata,
     )

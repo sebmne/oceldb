@@ -2,7 +2,7 @@
 
 This document describes the on-disk layout that oceldb uses to store OCEL 2.0 logs, explains each design decision, and discusses the trade-offs involved. It is intended for downstream library authors, contributors, and anyone who wants to read oceldb files directly — without going through the Python API.
 
-The short version: **an oceldb log is a directory of Parquet files, partitioned by type, and nothing else.** There is no database, no manifest, no index sidecar. The files *are* the format, and any columnar/Arrow-native engine can read them.
+The short version: **an oceldb log is a directory of type-partitioned Parquet files plus a small versioned manifest.** The Parquet files remain directly readable by any Arrow-native engine; `manifest.json` preserves the complete declared OCEL schema, the layout version, and optional metadata.
 
 ---
 
@@ -13,7 +13,7 @@ The format is designed around one primary constraint: **a columnar engine (Polar
 Secondary goals, in priority order:
 
 1. **Readable without oceldb.** You can open any file with plain `pl.scan_parquet(...)` or `duckdb.read_parquet(...)` and understand what you see. No bespoke reader required.
-2. **Self-describing.** All structural metadata — the set of types, their attribute schemas, counts, and time ranges — is recoverable from the directory structure and the Parquet footers. No separate metadata file to maintain or to drift out of sync.
+2. **Self-describing.** Row data, counts, and time ranges are recoverable from the directory structure and Parquet footers. The manifest records only stable metadata that cannot be recovered faithfully from populated rows, notably unused types and all-null declared attributes.
 3. **Schema-stable across type evolution.** Adding a new event or object type adds a directory; it never rewrites existing files.
 4. **Compact on disk.** A log with 10M events should not cost gigabytes for format overhead alone.
 
@@ -23,6 +23,7 @@ Secondary goals, in priority order:
 
 ```
 my-log/
+  manifest.json
   events/
     ocel_type=Place%20Order/data.parquet
     ocel_type=Pay%20Order/data.parquet
@@ -41,6 +42,24 @@ my-log/
 Type names are **URL-encoded** in directory names (`Place Order` → `Place%20Order`). This keeps paths unambiguous across operating systems and shells without inventing a bespoke escaping scheme; the canonical name (with spaces, slashes, unicode, …) is always recoverable by URL-decoding. **Note for direct readers:** when you read with `hive_partitioning`, the injected `ocel_type` value is the *encoded* string — URL-decode it to get the canonical type name. (oceldb's own reader decodes it for you.)
 
 The reserved column names (`ocel_id`, `ocel_time`, `ocel_type`, `ocel_changed_field`, the relation columns, …) are the stable contract and are defined as constants in `oceldb.schema`.
+
+The manifest is required. A directory containing only similarly named Parquet
+files is not treated as an oceldb dataset.
+
+### `manifest.json`
+
+The manifest is written last and acts as the commit marker for a version 1
+dataset. It contains:
+
+- `format`: always `"oceldb"`;
+- `formatVersion`: currently `1`;
+- the complete declared event and object schemas;
+- the stable paths and partition columns of the five logical tables;
+- optional JSON-compatible dataset or provenance metadata.
+
+It deliberately does **not** contain row counts, time ranges, or cached
+summaries. Those values change when rows change and remain derived from Parquet
+metadata, preventing a stale manifest from misreporting the actual data.
 
 ---
 
@@ -108,20 +127,28 @@ The object-to-object (O2O) relation: `ocel_source_id`, `ocel_source_type`, `ocel
 ## Conventions
 
 - **Compression:** all files use **ZSTD** — a middle ground between Snappy (weaker ratio) and GZIP (slower). Combined with Parquet's automatic dictionary encoding for low-cardinality strings, no manual tuning is needed.
-- **Per-type files carry only that type's attributes,** so different types' files have different column sets. A reader unions them **by name** — an attribute absent from a type's file is simply `NULL` for those rows. (oceldb's native writer additionally omits an attribute that is `NULL` for every row of a type; the SQLite importer keeps every declared attribute column.)
+- **Per-type files carry only that type's declared attributes,** so different types' files have different column sets. A reader unions them **by name** — an attribute absent from a type's file is simply `NULL` for those rows. When an `OCELSchema` is available, empty and all-null declared attributes are retained as typed columns; manually constructed logs without metadata infer their schema from observed values.
 - **Timestamps** are stored as microsecond Parquet timestamps; ids, types and qualifiers as strings; numeric attributes as `int64`/`double`, booleans as `bool`.
 
 ---
 
-## No manifest — the data is the source of truth
+## Manifest and Parquet responsibilities
 
-Earlier versions kept a `manifest.json` listing types, counts, time ranges and attribute schemas. It is gone, on purpose. Every piece of that metadata is already derivable from the layout:
+Parquet remains the source of truth for all row-level facts. Types represented
+on disk can be discovered from partition directories, populated attribute
+schemas from Parquet footers, and counts or time ranges from row-group
+statistics without scanning column data.
 
-- **Types** — the `ocel_type=…` partition directories.
-- **Attribute schemas** — the Parquet column schema in each per-type footer.
-- **Counts and time ranges** — Parquet row-group statistics (row counts; per-column min/max), read from footers **without scanning any data**.
+The manifest is authoritative only for the native layout version, the complete
+declared OCEL schema, and user metadata. This distinction avoids the drift
+problem of older manifest designs that cached mutable totals while removing the
+need to infer semantic declarations from empty physical files.
 
-So a manifest is redundant — and worse, it can *drift*: a filtered or edited log whose manifest still advertises the original totals is a silent correctness bug (one the manifest-first design actually had). Removing it makes the files the single source of truth: what you read is always what is there. "How many `Pay Order` events?" is answered by reading footers — cheap (metadata only), just not literally a single JSON read.
+Version 1 still writes empty `data.parquet` partitions for declared types with
+no instances and retains typed all-null columns. This keeps the dataset useful
+to direct Parquet consumers that ignore the manifest. The manifest makes those
+semantics explicit for oceldb and allows a future storage engine to avoid
+depending on empty files without losing information.
 
 ---
 
@@ -183,4 +210,4 @@ SELECT * FROM 'my-log/event_object.parquet';
 
 - **Sub-partitioning by time** (`type` + year/month). Would further accelerate time-range queries on very large logs; deferred.
 - **Append mode.** Writes always produce a complete, self-contained directory; incremental appends are not supported.
-- **In-band format version.** The directory layout plus the reserved column names in `oceldb.schema` are the contract; there is currently no version marker file (a deliberate simplification over the old manifest). A breaking layout change would, if ever needed, introduce a small marker so readers can refuse versions they don't understand.
+- **File checksums and inventories.** These may be added if a concrete integrity or remote-storage use case justifies their maintenance cost.

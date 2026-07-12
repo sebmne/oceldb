@@ -1,25 +1,14 @@
 """Project filter: restrict an OCEL to events involving a set of objects."""
 
-from collections.abc import Callable
-from typing import overload
-
 import polars as pl
 
 from oceldb import schema as s
-from oceldb.utils._step import _step
-from oceldb.pruning import prune_log
+from oceldb.utils.step import step
+from oceldb.core.pruning import sublog_from_event_ids
 from oceldb.ocel import OCEL
 
 
-@overload
-def project(ocel: OCEL, *object_ids: str) -> OCEL: ...
-
-
-@overload
-def project(*object_ids: str) -> Callable[[OCEL], OCEL]: ...
-
-
-@_step
+@step
 def project(ocel: OCEL, *object_ids: str) -> OCEL:
     """Project *ocel* onto a set of objects, returning the induced sub-log.
 
@@ -50,15 +39,4 @@ def project(ocel: OCEL, *object_ids: str) -> OCEL:
         .select(s.OCEL_EVENT_ID)
         .unique()
     )
-    relations = ocel.event_object().join(kept_events, on=s.OCEL_EVENT_ID, how="semi")
-    kept_objects = relations.select(s.OCEL_OBJECT_ID).unique()
-    return prune_log(
-        ocel,
-        events=ocel.events().join(
-            kept_events, left_on=s.OCEL_ID, right_on=s.OCEL_EVENT_ID, how="semi"
-        ),
-        objects=ocel.objects().join(
-            kept_objects, left_on=s.OCEL_ID, right_on=s.OCEL_OBJECT_ID, how="semi"
-        ),
-        e2o=relations,
-    )
+    return sublog_from_event_ids(ocel, kept_events)

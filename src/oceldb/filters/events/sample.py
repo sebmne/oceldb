@@ -1,35 +1,13 @@
 """sample_events: reduce a log to a random subset of its events."""
 
-from collections.abc import Callable
-from typing import overload
-
 from oceldb import schema as s
-from oceldb.utils._step import _step
+from oceldb.utils.step import step
 from oceldb.filters._utils import _sample_ids
 from oceldb.filters.events.by_id import filter_events_by_id
 from oceldb.ocel import OCEL
 
 
-@overload
-def sample_events(
-    ocel: OCEL,
-    n: int | None = ...,
-    *,
-    fraction: float | None = ...,
-    seed: int | None = ...,
-) -> OCEL: ...
-
-
-@overload
-def sample_events(
-    n: int | None = ...,
-    *,
-    fraction: float | None = ...,
-    seed: int | None = ...,
-) -> Callable[[OCEL], OCEL]: ...
-
-
-@_step
+@step
 def sample_events(
     ocel: OCEL,
     n: int | None = None,

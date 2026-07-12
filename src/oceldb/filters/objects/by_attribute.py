@@ -1,39 +1,18 @@
 """filter_objects_by_attribute: keep objects satisfying a predicate on their states."""
 
-from collections.abc import Callable, Iterable
-from typing import Literal, overload
+from collections.abc import Iterable
+from typing import Literal
 
 import polars as pl
 
 from oceldb import schema as s
-from oceldb.utils import to_list
-from oceldb.utils._step import _step
-from oceldb.pruning import prune_log
+from oceldb.utils.step import step
+from oceldb.core.pruning import sublog_from_relations
+from oceldb.filters._utils import normalize_scope
 from oceldb.ocel import OCEL
 
 
-@overload
-def filter_objects_by_attribute(
-    ocel: OCEL,
-    predicate: pl.Expr,
-    *,
-    object_types: str | Iterable[str] | None = ...,
-    when: Literal["sometimes", "always"] | str = ...,
-    mode: Literal["include", "exclude"] = ...,
-) -> OCEL: ...
-
-
-@overload
-def filter_objects_by_attribute(
-    predicate: pl.Expr,
-    *,
-    object_types: str | Iterable[str] | None = ...,
-    when: Literal["sometimes", "always"] | str = ...,
-    mode: Literal["include", "exclude"] = ...,
-) -> Callable[[OCEL], OCEL]: ...
-
-
-@_step
+@step
 def filter_objects_by_attribute(
     ocel: OCEL,
     predicate: pl.Expr,
@@ -71,7 +50,7 @@ def filter_objects_by_attribute(
         >>> sub = filter_objects_by_attribute(ocel, pl.col("price") > 100, object_types="order", when="always")
         >>> sub = ocel >> filter_objects_by_attribute(pl.col("price") > 100, mode="exclude")
     """
-    scope = to_list(object_types) if object_types is not None else None
+    scope = normalize_scope(object_types)
     states = ocel.object_states() if scope is None else ocel.object_states(*scope)
     scoped_objects = (
         ocel.objects()
@@ -113,15 +92,4 @@ def filter_objects_by_attribute(
         )
         relations = pl.concat([non_target, target])
 
-    kept_events = relations.select(s.OCEL_EVENT_ID).unique()
-    kept_objects = relations.select(s.OCEL_OBJECT_ID).unique()
-    return prune_log(
-        ocel,
-        events=ocel.events().join(
-            kept_events, left_on=s.OCEL_ID, right_on=s.OCEL_EVENT_ID, how="semi"
-        ),
-        objects=ocel.objects().join(
-            kept_objects, left_on=s.OCEL_ID, right_on=s.OCEL_OBJECT_ID, how="semi"
-        ),
-        e2o=relations,
-    )
+    return sublog_from_relations(ocel, relations)

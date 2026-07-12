@@ -1,33 +1,16 @@
 """filter_events_by_id: keep or remove events by ocel_id."""
 
-from collections.abc import Callable, Iterable
-from typing import Literal, overload
+from collections.abc import Iterable
+from typing import Literal
 
 import polars as pl
 
 from oceldb import schema as s
-from oceldb.utils._step import _step
+from oceldb.utils.step import step
 from oceldb.ocel import OCEL
 
 
-@overload
-def filter_events_by_id(
-    ocel: OCEL,
-    *ids: str,
-    event_types: str | Iterable[str] | None = ...,
-    mode: Literal["include", "exclude"] = ...,
-) -> OCEL: ...
-
-
-@overload
-def filter_events_by_id(
-    *ids: str,
-    event_types: str | Iterable[str] | None = ...,
-    mode: Literal["include", "exclude"] = ...,
-) -> Callable[[OCEL], OCEL]: ...
-
-
-@_step
+@step
 def filter_events_by_id(
     ocel: OCEL,
     *ids: str,

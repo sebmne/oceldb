@@ -1,46 +1,26 @@
-"""Shared helpers for in-memory OCEL readers."""
+"""Shared normalization helpers for in-memory OCEL readers."""
 
+from datetime import datetime, timezone
 from typing import Any
+from collections.abc import Mapping
 
 import polars as pl
 
-from oceldb import schema as s
+from oceldb.schema import OCELSchema
+from oceldb.schema._layout import (
+    E2O_SCHEMA,
+    EVENTS_SCHEMA,
+    OBJECT_CHANGES_SCHEMA,
+    OBJECTS_SCHEMA,
+    O2O_SCHEMA,
+)
 from oceldb.ocel import OCEL
 
-_EPOCH = "1970-01-01T00:00:00+00:00"
-
-EVENTS_SCHEMA: dict[str, pl.DataType] = {
-    s.OCEL_ID: pl.String(),
-    s.OCEL_TIME: pl.Datetime("us", "UTC"),
-    s.OCEL_TYPE: pl.String(),
-}
-OBJECTS_SCHEMA: dict[str, pl.DataType] = {
-    s.OCEL_ID: pl.String(),
-    s.OCEL_TYPE: pl.String(),
-}
-OBJECT_CHANGES_SCHEMA: dict[str, pl.DataType] = {
-    s.OCEL_ID: pl.String(),
-    s.OCEL_TIME: pl.Datetime("us", "UTC"),
-    s.OCEL_TYPE: pl.String(),
-    s.OCEL_CHANGED_FIELD: pl.String(),
-}
-E2O_SCHEMA: dict[str, pl.DataType] = {
-    s.OCEL_EVENT_ID: pl.String(),
-    s.OCEL_EVENT_TYPE: pl.String(),
-    s.OCEL_OBJECT_ID: pl.String(),
-    s.OCEL_OBJECT_TYPE: pl.String(),
-    s.OCEL_QUALIFIER: pl.String(),
-}
-O2O_SCHEMA: dict[str, pl.DataType] = {
-    s.OCEL_SOURCE_ID: pl.String(),
-    s.OCEL_SOURCE_TYPE: pl.String(),
-    s.OCEL_TARGET_ID: pl.String(),
-    s.OCEL_TARGET_TYPE: pl.String(),
-    s.OCEL_QUALIFIER: pl.String(),
-}
+EPOCH = "1970-01-01T00:00:00+00:00"
+EPOCH_DATETIME = datetime(1970, 1, 1, tzinfo=timezone.utc)
 
 
-def empty_lf(schema: dict[str, pl.DataType]) -> pl.LazyFrame:
+def empty_lf(schema: Mapping[str, pl.DataType]) -> pl.LazyFrame:
     return pl.DataFrame({k: pl.Series([], dtype=v) for k, v in schema.items()}).lazy()
 
 
@@ -55,6 +35,7 @@ def build_ocel(
     object_change_rows: list[dict[str, Any]],
     e2o_rows: list[dict[str, Any]],
     o2o_rows: list[dict[str, Any]],
+    schema: OCELSchema | None = None,
 ) -> OCEL:
     """Assemble an in-memory ``OCEL`` from parsed row dictionaries.
 
@@ -62,16 +43,15 @@ def build_ocel(
     correctly typed empty frame. Event and object-change timestamps are parsed
     from their ISO 8601 string form. Shared by the JSON and XML readers.
     """
-    return OCEL(
-        events=parse_timestamps(rows_to_lf(event_rows), s.OCEL_TIME)
-        if event_rows
-        else empty_lf(EVENTS_SCHEMA),
+    return OCEL.from_frames(
+        events=rows_to_lf(event_rows) if event_rows else empty_lf(EVENTS_SCHEMA),
         objects=rows_to_lf(object_rows) if object_rows else empty_lf(OBJECTS_SCHEMA),
-        object_changes=parse_timestamps(rows_to_lf(object_change_rows), s.OCEL_TIME)
+        object_changes=rows_to_lf(object_change_rows)
         if object_change_rows
         else empty_lf(OBJECT_CHANGES_SCHEMA),
-        e2o=rows_to_lf(e2o_rows) if e2o_rows else empty_lf(E2O_SCHEMA),
-        o2o=rows_to_lf(o2o_rows) if o2o_rows else empty_lf(O2O_SCHEMA),
+        event_object=rows_to_lf(e2o_rows) if e2o_rows else empty_lf(E2O_SCHEMA),
+        object_object=rows_to_lf(o2o_rows) if o2o_rows else empty_lf(O2O_SCHEMA),
+        schema=schema,
     )
 
 

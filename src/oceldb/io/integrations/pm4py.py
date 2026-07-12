@@ -1,21 +1,29 @@
-"""Convert a pm4py OCEL object to an oceldb OCEL."""
+"""Convert between oceldb and pm4py OCEL objects."""
 
 from __future__ import annotations
 
+from datetime import date, datetime
+from pathlib import Path
+from tempfile import TemporaryDirectory
 from typing import Any
 
 import polars as pl
 
 from oceldb import schema as s
-from oceldb.io.read._common import (
-    _EPOCH,
+from oceldb.io._schema import materialize
+from oceldb.io._values import format_datetime
+from oceldb.io.exchange._common import (
+    EPOCH,
     O2O_SCHEMA,
     OBJECT_CHANGES_SCHEMA,
     empty_lf,
     parse_timestamps,
     rows_to_lf,
 )
+from oceldb.io.exchange.json.writer import write_json
 from oceldb.ocel import OCEL
+
+__all__ = ["from_pm4py", "to_pm4py"]
 
 # pm4py column name constants
 _EID = "ocel:eid"
@@ -34,7 +42,7 @@ _OBJECT_CORE = {_OID, _OTYPE}
 _OBJECT_CHANGE_CORE = {_OID, _OTYPE, _TIMESTAMP, _FIELD, _CHANGED_FIELD, _CUMCOUNT}
 
 
-def read_pm4py(pm4py_ocel: Any) -> OCEL:
+def from_pm4py(pm4py_ocel: Any) -> OCEL:
     """Convert a pm4py OCEL 2.0 ``OCEL`` object to an oceldb :class:`~oceldb.OCEL`.
 
     Object attribute histories are read from pm4py's time-stamped
@@ -60,12 +68,12 @@ def read_pm4py(pm4py_ocel: Any) -> OCEL:
 
     Examples:
         >>> import pm4py
-        >>> from oceldb.io import read_pm4py
+        >>> from oceldb.io import from_pm4py
         >>> pm4py_ocel = pm4py.read_ocel2_xml("log.xmlocel")
-        >>> ocel = read_pm4py(pm4py_ocel)
+        >>> ocel = from_pm4py(pm4py_ocel)
     """
     try:
-        import pandas as pd
+        import pandas as pd  # pyright: ignore[reportMissingImports]
     except ImportError:
         raise ImportError("pandas is required for pm4py interop: pip install pandas")
 
@@ -95,7 +103,7 @@ def read_pm4py(pm4py_ocel: Any) -> OCEL:
             if c in pm4py_ocel.relations.columns
         ]
     ]
-    e2o = pl.from_pandas(
+    e2o_frame = pl.from_pandas(
         rel_df.rename(
             columns={
                 _EID: s.OCEL_EVENT_ID,
@@ -105,7 +113,19 @@ def read_pm4py(pm4py_ocel: Any) -> OCEL:
                 _QUALIFIER: s.OCEL_QUALIFIER,
             }
         )
-    ).lazy()
+    )
+    for column in (
+        s.OCEL_EVENT_ID,
+        s.OCEL_EVENT_TYPE,
+        s.OCEL_OBJECT_ID,
+        s.OCEL_OBJECT_TYPE,
+        s.OCEL_QUALIFIER,
+    ):
+        if column not in e2o_frame.columns:
+            e2o_frame = e2o_frame.with_columns(
+                pl.lit(None, dtype=pl.String()).alias(column)
+            )
+    e2o = e2o_frame.lazy()
 
     # --- O2O ---
     o2o_df = getattr(pm4py_ocel, "o2o", None)
@@ -130,7 +150,22 @@ def read_pm4py(pm4py_ocel: Any) -> OCEL:
     else:
         o2o = empty_lf(O2O_SCHEMA)
 
-    return OCEL(events=events, objects=objects, object_changes=oc, o2o=o2o, e2o=e2o)
+    result = OCEL.from_frames(
+        events=events,
+        objects=objects,
+        object_changes=oc,
+        object_object=o2o,
+        event_object=e2o,
+    )
+    inferred = materialize(result).schema
+    return OCEL.from_frames(
+        events=events,
+        objects=objects,
+        object_changes=oc,
+        object_object=o2o,
+        event_object=e2o,
+        schema=inferred,
+    )
 
 
 def _object_changes_from_pm4py(
@@ -160,8 +195,8 @@ def _object_changes_from_pm4py(
                 {
                     s.OCEL_ID: str(row[_OID]),
                     s.OCEL_TYPE: str(row[_OTYPE]),
-                    s.OCEL_TIME: _EPOCH,
-                    s.OCEL_CHANGED_FIELD: field,
+                    s.OCEL_TIME: EPOCH,
+                    s.OCEL_CHANGED_FIELD: None,
                     field: value,
                 }
             )
@@ -230,9 +265,33 @@ def _is_missing(value: Any, pd: Any) -> bool:
 def _to_iso(value: Any) -> str:
     """Render a pm4py timestamp as an ISO 8601 string for :func:`parse_timestamps`.
 
-    pandas ``Timestamp`` and ``datetime`` values expose ``isoformat`` (which uses
-    the ``T`` separator that :func:`parse_timestamps` expects); anything else is
-    passed through as its plain string form.
+    Datetime-like values are normalized to the same UTC spelling used by the
+    exchange writers; anything else is passed through as plain text.
     """
-    isoformat = getattr(value, "isoformat", None)
-    return isoformat() if callable(isoformat) else str(value)
+    if hasattr(value, "to_pydatetime"):
+        value = value.to_pydatetime()
+    if isinstance(value, (datetime, date)):
+        return format_datetime(value)
+    return str(value)
+
+
+def to_pm4py(ocel: OCEL) -> Any:
+    """Return a pm4py OCEL through its public OCEL 2.0 JSON importer.
+
+    Using pm4py's own importer keeps this bridge compatible with its internal
+    dataframe model instead of depending on the constructor signature of a
+    specific pm4py release.
+    """
+    try:
+        import pm4py  # pyright: ignore[reportMissingImports]
+    except ImportError as exc:
+        raise ImportError("pm4py interop requires: pip install pm4py") from exc
+    with TemporaryDirectory(prefix="oceldb-pm4py-") as directory:
+        path = Path(directory) / "exchange.jsonocel"
+        write_json(ocel, path)
+        reader = getattr(pm4py, "read_ocel2_json", None)
+        if reader is None:
+            reader = getattr(pm4py, "read_ocel", None)
+        if reader is None:
+            raise RuntimeError("Installed pm4py has no OCEL 2.0 JSON reader.")
+        return reader(str(path))

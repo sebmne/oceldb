@@ -1,28 +1,15 @@
 """filter_events_by_type: keep or remove events by ocel_type."""
 
-from collections.abc import Callable
-from typing import Literal, overload
+from typing import Literal
 
 import polars as pl
 
 from oceldb import schema as s
-from oceldb.utils._step import _step
+from oceldb.utils.step import step
 from oceldb.ocel import OCEL
 
 
-@overload
-def filter_events_by_type(
-    ocel: OCEL, *types: str, mode: Literal["include", "exclude"] = ...
-) -> OCEL: ...
-
-
-@overload
-def filter_events_by_type(
-    *types: str, mode: Literal["include", "exclude"] = ...
-) -> Callable[[OCEL], OCEL]: ...
-
-
-@_step
+@step
 def filter_events_by_type(
     ocel: OCEL, *types: str, mode: Literal["include", "exclude"] = "include"
 ) -> OCEL:

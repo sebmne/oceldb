@@ -1,17 +1,37 @@
 """Shared utilities for filter implementations."""
 
-from typing import Literal, cast
+from collections.abc import Iterable
+from typing import Literal, TypeAlias, cast
 
 import polars as pl
 
 from oceldb import schema as s
+from oceldb.core.pruning import sublog_from_object_ids
 from oceldb.ocel import OCEL
-from oceldb.pruning import prune_log
+from oceldb.utils import to_list
 
 Mode = Literal["include", "exclude"]
+TypeScope: TypeAlias = str | Iterable[str] | None
 
 
-def _scoped_match(
+def normalize_scope(scope: TypeScope) -> list[str] | None:
+    """Normalize an optional scalar-or-iterable type scope."""
+    return None if scope is None else to_list(scope)
+
+
+def within_bounds(
+    *, min_count: int | None, max_count: int | None, column: str = "_count"
+) -> pl.Expr:
+    """Build an inclusive count-range predicate."""
+    predicate = pl.lit(True)
+    if min_count is not None:
+        predicate &= pl.col(column) >= min_count
+    if max_count is not None:
+        predicate &= pl.col(column) <= max_count
+    return predicate
+
+
+def scoped_match(
     match: pl.Expr,
     *,
     type_col: str,
@@ -63,16 +83,4 @@ def _filter_objects_direct(ocel: OCEL, predicate: pl.Expr) -> OCEL:
         .filter(predicate)
         .select(pl.col(s.OCEL_ID).alias(s.OCEL_OBJECT_ID))
     )
-    relations = ocel.event_object().join(satisfying, on=s.OCEL_OBJECT_ID, how="semi")
-    kept_events = relations.select(s.OCEL_EVENT_ID).unique()
-    kept_objects = relations.select(s.OCEL_OBJECT_ID).unique()
-    return prune_log(
-        ocel,
-        events=ocel.events().join(
-            kept_events, left_on=s.OCEL_ID, right_on=s.OCEL_EVENT_ID, how="semi"
-        ),
-        objects=ocel.objects().join(
-            kept_objects, left_on=s.OCEL_ID, right_on=s.OCEL_OBJECT_ID, how="semi"
-        ),
-        e2o=relations,
-    )
+    return sublog_from_object_ids(ocel, satisfying)

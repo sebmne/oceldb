@@ -1,35 +1,17 @@
 """View filter: restrict an OCEL to selected event and object types."""
 
-from collections.abc import Callable, Iterable
-from typing import overload
+from collections.abc import Iterable
 
 import polars as pl
 
 from oceldb import schema as s
 from oceldb.utils import to_list
-from oceldb.utils._step import _step
-from oceldb.pruning import prune_log
+from oceldb.utils.step import step
+from oceldb.core.pruning import sublog_from_relations
 from oceldb.ocel import OCEL
 
 
-@overload
-def view(
-    ocel: OCEL,
-    *,
-    event_types: str | Iterable[str] | None = ...,
-    object_types: str | Iterable[str] | None = ...,
-) -> OCEL: ...
-
-
-@overload
-def view(
-    *,
-    event_types: str | Iterable[str] | None = ...,
-    object_types: str | Iterable[str] | None = ...,
-) -> Callable[[OCEL], OCEL]: ...
-
-
-@_step
+@step
 def view(
     ocel: OCEL,
     *,
@@ -68,15 +50,4 @@ def view(
         relations = relations.filter(
             pl.col(s.OCEL_OBJECT_TYPE).is_in(to_list(object_types))
         )
-    kept_events = relations.select(s.OCEL_EVENT_ID).unique()
-    kept_objects = relations.select(s.OCEL_OBJECT_ID).unique()
-    return prune_log(
-        ocel,
-        events=ocel.events().join(
-            kept_events, left_on=s.OCEL_ID, right_on=s.OCEL_EVENT_ID, how="semi"
-        ),
-        objects=ocel.objects().join(
-            kept_objects, left_on=s.OCEL_ID, right_on=s.OCEL_OBJECT_ID, how="semi"
-        ),
-        e2o=relations,
-    )
+    return sublog_from_relations(ocel, relations)

@@ -1,12 +1,11 @@
 """flatten: project an OCEL onto one object type as a classical event log."""
 
-from collections.abc import Callable
-from typing import cast, overload
+from typing import cast
 
 import polars as pl
 
 from oceldb import schema as s
-from oceldb.utils._step import _step
+from oceldb.utils.step import step
 from oceldb.ocel import OCEL
 
 _STATE_FIXED = {
@@ -19,15 +18,7 @@ _STATE_FIXED = {
 _EVENT_FIXED = {s.OCEL_ID, s.OCEL_TIME, s.OCEL_TYPE}
 
 
-@overload
-def flatten(ocel: OCEL, object_type: str) -> pl.LazyFrame: ...
-
-
-@overload
-def flatten(object_type: str) -> Callable[[OCEL], pl.LazyFrame]: ...
-
-
-@_step
+@step
 def flatten(ocel: OCEL, object_type: str) -> pl.LazyFrame:
     """Flatten the log to a classical XES-style event log for one object type.
 

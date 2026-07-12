@@ -1,7 +1,7 @@
-"""Convert OCEL 2.0 SQLite exports to oceldb's Parquet layout.
+"""Import OCEL 2.0 SQLite exports into oceldb's Parquet layout.
 
 DuckDB attaches the SQLite log read-only and streams each per-type table into the
-Hive-partitioned layout (see :mod:`oceldb.store`) via a per-type ``COPY``. This is
+Hive-partitioned layout (see :mod:`oceldb.io.native`) via a per-type ``COPY``. This is
 the only DuckDB-backed code in the core library; it is imported lazily so
 ``import oceldb`` stays pure-Polars.
 
@@ -17,14 +17,18 @@ import shutil
 import sqlite3
 from dataclasses import dataclass
 from pathlib import Path
+from typing import AbstractSet
 from uuid import uuid4
 
 import duckdb
-from oceldb.store import encode_type_name
+from oceldb.io.errors import OCELIOError, ValidationMode, check_validation_mode, issue
+from oceldb.io.native.manifest import write_manifest
+from oceldb.io.native.storage import encode_type_name, infer_storage_schema
+from oceldb.schema._layout import CHANGE_CORE, EVENT_CORE
 
-_EPOCH = "TIMESTAMP '1970-01-01 00:00:00'"
-_EVENT_CORE = {"ocel_id", "ocel_time"}
-_OBJECT_CHANGE_CORE = {"ocel_id", "ocel_time", "ocel_changed_field"}
+_EPOCH = "TIMESTAMPTZ '1970-01-01 00:00:00+00:00'"
+_EVENT_CORE = set(EVENT_CORE)
+_OBJECT_CHANGE_CORE = set(CHANGE_CORE)
 
 _E2O_QUERY = (
     "SELECT eo.ocel_event_id, e.ocel_type AS ocel_event_type, "
@@ -44,13 +48,14 @@ _O2O_QUERY = (
 )
 
 
-def convert_sqlite(
+def import_sqlite(
     source: str | Path,
     target: str | Path,
     *,
     overwrite: bool = False,
+    validation: ValidationMode = "strict",
 ) -> None:
-    """Convert an OCEL 2.0 SQLite export to a native oceldb directory.
+    """Import an OCEL 2.0 SQLite export into a native oceldb directory.
 
     Args:
         source: Path to an OCEL 2.0 SQLite database. Supported inputs are the
@@ -72,9 +77,10 @@ def convert_sqlite(
         are cast to DuckDB ``BIGINT`` to avoid 32-bit overflow in large logs.
 
     Examples:
-        >>> from oceldb.io import convert_sqlite
-        >>> convert_sqlite("running-example.sqlite", "running-example")
+        >>> from oceldb.io import import_sqlite
+        >>> import_sqlite("running-example.sqlite", "running-example")
     """
+    validation = check_validation_mode(validation)
     source = Path(source)
     target = Path(target)
     if not source.exists():
@@ -94,11 +100,15 @@ def convert_sqlite(
             con.execute(
                 f"ATTACH {_sql_string(str(source))} AS src (TYPE SQLITE, READ_ONLY)"
             )
-            _write_events(con, source, staging)
-            _write_objects_and_changes(con, source, staging)
+            cast_function = "CAST" if validation == "strict" else "TRY_CAST"
+            _write_events(con, source, staging, cast_function, validation)
+            _write_objects_and_changes(con, source, staging, cast_function, validation)
+            if validation == "strict":
+                _validate_relation_joins(con, source)
             _copy(con, _E2O_QUERY, staging / "event_object.parquet")
             if "object_object" in _table_names(source) and _count(con, "object_object"):
                 _copy(con, _O2O_QUERY, staging / "object_object.parquet")
+            write_manifest(staging, schema=infer_storage_schema(staging))
         finally:
             con.close()
     except BaseException:
@@ -118,15 +128,28 @@ class _Mapping:
     suffix: str
 
 
-def _write_events(con: duckdb.DuckDBPyConnection, source: Path, staging: Path) -> None:
+def _write_events(
+    con: duckdb.DuckDBPyConnection,
+    source: Path,
+    staging: Path,
+    cast_function: str,
+    validation: ValidationMode,
+) -> None:
     base = staging / "events"
     base.mkdir()
     for mapping in _mappings(con, "event_map_type"):
         attrs = _attribute_columns(source, f"event_{mapping.suffix}", _EVENT_CORE)
+        table_name = f"event_{mapping.suffix}"
+        _check_cast(con, table_name, "ocel_time", "TIMESTAMPTZ", validation)
+        for name, sqlite_type in attrs:
+            _check_cast(con, table_name, name, _duckdb_type(sqlite_type), validation)
         columns = [
             "ocel_id",
-            "TRY_CAST(ocel_time AS TIMESTAMP) AS ocel_time",
-            *(_cast_expr(name, sqlite_type) for name, sqlite_type in attrs),
+            f"{cast_function}(ocel_time AS TIMESTAMPTZ) AS ocel_time",
+            *(
+                _cast_expr(name, sqlite_type, cast_function)
+                for name, sqlite_type in attrs
+            ),
         ]
         out_dir = base / f"ocel_type={encode_type_name(mapping.type_name)}"
         out_dir.mkdir()
@@ -139,7 +162,11 @@ def _write_events(con: duckdb.DuckDBPyConnection, source: Path, staging: Path) -
 
 
 def _write_objects_and_changes(
-    con: duckdb.DuckDBPyConnection, source: Path, staging: Path
+    con: duckdb.DuckDBPyConnection,
+    source: Path,
+    staging: Path,
+    cast_function: str,
+    validation: ValidationMode,
 ) -> None:
     objects_base = staging / "objects"
     objects_base.mkdir()
@@ -167,9 +194,18 @@ def _write_objects_and_changes(
             if name not in _OBJECT_CHANGE_CORE
         ]
         if "ocel_changed_field" in names:
+            _check_cast(
+                con,
+                table,
+                "ocel_time",
+                "TIMESTAMPTZ",
+                validation,
+                condition="ocel_changed_field IS NOT NULL",
+            )
             time_expr = (
                 "CASE WHEN ocel_changed_field IS NULL THEN "
-                f"{_EPOCH} ELSE TRY_CAST(ocel_time AS TIMESTAMP) END AS ocel_time"
+                f"{_EPOCH} ELSE {cast_function}(ocel_time AS TIMESTAMPTZ) "
+                "END AS ocel_time"
             )
             changed_expr = "ocel_changed_field"
         else:
@@ -179,8 +215,13 @@ def _write_objects_and_changes(
             "ocel_id",
             time_expr,
             changed_expr,
-            *(_cast_expr(name, sqlite_type) for name, sqlite_type in attrs),
+            *(
+                _cast_expr(name, sqlite_type, cast_function)
+                for name, sqlite_type in attrs
+            ),
         ]
+        for name, sqlite_type in attrs:
+            _check_cast(con, table, name, _duckdb_type(sqlite_type), validation)
         ch_dir = changes_base / f"ocel_type={encoded}"
         ch_dir.mkdir()
         _copy(
@@ -209,6 +250,27 @@ def _count(con: duckdb.DuckDBPyConnection, table: str) -> int:
     return int(row[0]) if row else 0
 
 
+def _validate_relation_joins(con: duckdb.DuckDBPyConnection, source: Path) -> None:
+    e2o_rows = _count(con, "event_object")
+    joined_e2o = _query_count(con, _E2O_QUERY)
+    if joined_e2o != e2o_rows:
+        raise OCELIOError(
+            f"SQLite event_object contains {e2o_rows - joined_e2o} dangling relation(s)."
+        )
+    if "object_object" in _table_names(source):
+        o2o_rows = _count(con, "object_object")
+        joined_o2o = _query_count(con, _O2O_QUERY)
+        if joined_o2o != o2o_rows:
+            raise OCELIOError(
+                f"SQLite object_object contains {o2o_rows - joined_o2o} dangling relation(s)."
+            )
+
+
+def _query_count(con: duckdb.DuckDBPyConnection, query: str) -> int:
+    row = con.execute(f"SELECT COUNT(*) FROM ({query}) AS checked").fetchone()
+    return int(row[0]) if row else 0
+
+
 def _table_names(source: Path) -> set[str]:
     with sqlite3.connect(source) as connection:
         rows = connection.execute(
@@ -218,7 +280,7 @@ def _table_names(source: Path) -> set[str]:
 
 
 def _attribute_columns(
-    source: Path, table: str, core: set[str]
+    source: Path, table: str, core: AbstractSet[str]
 ) -> list[tuple[str, str]]:
     return [
         (name, sqlite_type)
@@ -235,16 +297,48 @@ def _pragma_columns(source: Path, table: str) -> list[tuple[str, str]]:
     return [(str(row[1]), str(row[2])) for row in rows]
 
 
-def _cast_expr(column: str, sqlite_type: str) -> str:
+def _cast_expr(column: str, sqlite_type: str, cast_function: str) -> str:
     duckdb_type = _duckdb_type(sqlite_type)
     identifier = _quote(column)
     if duckdb_type == "VARCHAR":
         return identifier
-    return f"TRY_CAST({identifier} AS {duckdb_type}) AS {identifier}"
+    return f"{cast_function}({identifier} AS {duckdb_type}) AS {identifier}"
+
+
+def _check_cast(
+    con: duckdb.DuckDBPyConnection,
+    table: str,
+    column: str,
+    target_type: str,
+    validation: ValidationMode,
+    *,
+    condition: str | None = None,
+) -> None:
+    if validation == "none" or target_type == "VARCHAR":
+        return
+    identifier = _quote(column)
+    predicates = [
+        f"{identifier} IS NOT NULL",
+        f"TRY_CAST({identifier} AS {target_type}) IS NULL",
+    ]
+    if condition is not None:
+        predicates.append(condition)
+    row = con.execute(
+        f"SELECT COUNT(*) FROM src.{_quote(table)} WHERE {' AND '.join(predicates)}"
+    ).fetchone()
+    invalid = int(row[0]) if row else 0
+    if invalid:
+        issue(
+            validation,
+            f"SQLite {table}.{column} contains {invalid} value(s) that cannot "
+            f"be converted to {target_type}.",
+        )
 
 
 def _duckdb_type(sqlite_type: str) -> str:
     upper = sqlite_type.upper()
+    if any(key in upper for key in ("TIMESTAMP", "DATETIME", "DATE")):
+        return "TIMESTAMPTZ"
     if "INT" in upper:
         # int64: matches the existing converted logs and avoids 32-bit overflow.
         return "BIGINT"
