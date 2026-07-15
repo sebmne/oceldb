@@ -24,7 +24,7 @@ from oceldb.io.native.layout import (
 )
 from oceldb.io.native.manifest import write_manifest
 from oceldb.io.native.storage import scan_native_tables
-from oceldb.schema import OCELSchema, TypeAttributes
+from oceldb.schema import OCELSchema, TypeAttributes, widen_shared_attributes
 
 
 @dataclass
@@ -79,7 +79,9 @@ class NativeBatchSink:
     ) -> None:
         self._destination = DirectoryTransaction(Path(target), overwrite=overwrite)
         self.target = self._destination.target
-        self.schema = schema
+        # The union scan over the partitioned layout requires one dtype per
+        # shared attribute column, so conflicting declarations are widened.
+        self.schema = widen_shared_attributes(schema)
         self.batch_size = batch_size
         self.validation: ValidationMode = validation
         self.staging = self._destination.staging
