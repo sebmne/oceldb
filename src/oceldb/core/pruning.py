@@ -10,7 +10,6 @@ only decide *which* rows survive.
 import polars as pl
 
 from oceldb import schema as s
-from oceldb.core.dataset import OCELTable
 from oceldb.ocel import OCEL
 
 
@@ -20,8 +19,6 @@ def prune_log(
     events: pl.LazyFrame,
     objects: pl.LazyFrame,
     e2o: pl.LazyFrame,
-    events_table: OCELTable | None = None,
-    objects_table: OCELTable | None = None,
 ) -> OCEL:
     """Build a sub-log from surviving *events*, *objects*, and E2O relations.
 
@@ -41,44 +38,26 @@ def prune_log(
         A new ``OCEL`` whose ``object_changes`` and O2O relations reference only
         the objects in *objects*.
     """
-    kept_event_ids = events.select(s.OCEL_ID).unique()
     kept_ids = objects.select(s.OCEL_ID).unique()
     kept_object_ids = kept_ids.rename({s.OCEL_ID: s.OCEL_OBJECT_ID})
-    tables = ocel._dataset.tables
-    return OCEL(
-        ocel._dataset.with_tables(
-            events=(
-                events_table
-                if events_table is not None
-                else tables.events.map_partitions(
-                    lambda frame: frame.join(kept_event_ids, on=s.OCEL_ID, how="semi")
-                )
-            ),
-            objects=(
-                objects_table
-                if objects_table is not None
-                else tables.objects.map_partitions(
-                    lambda frame: frame.join(kept_ids, on=s.OCEL_ID, how="semi")
-                )
-            ),
-            object_changes=tables.object_changes.map_partitions(
-                lambda frame: frame.join(kept_ids, on=s.OCEL_ID, how="semi")
-            ),
-            object_object=tables.object_object.map_partitions(
-                lambda frame: frame.join(
-                    kept_object_ids,
-                    left_on=s.OCEL_SOURCE_ID,
-                    right_on=s.OCEL_OBJECT_ID,
-                    how="semi",
-                ).join(
-                    kept_object_ids,
-                    left_on=s.OCEL_TARGET_ID,
-                    right_on=s.OCEL_OBJECT_ID,
-                    how="semi",
-                )
-            ),
-            event_object=tables.event_object.replace(e2o),
+    return ocel._replace(
+        events=events,
+        objects=objects,
+        object_changes=ocel.object_changes().join(kept_ids, on=s.OCEL_ID, how="semi"),
+        object_object=ocel.object_object()
+        .join(
+            kept_object_ids,
+            left_on=s.OCEL_SOURCE_ID,
+            right_on=s.OCEL_OBJECT_ID,
+            how="semi",
         )
+        .join(
+            kept_object_ids,
+            left_on=s.OCEL_TARGET_ID,
+            right_on=s.OCEL_OBJECT_ID,
+            how="semi",
+        ),
+        event_object=e2o,
     )
 
 
@@ -87,7 +66,6 @@ def sublog_from_relations(
     relations: pl.LazyFrame,
     *,
     events: pl.LazyFrame | None = None,
-    events_table: OCELTable | None = None,
 ) -> OCEL:
     """Build the connected sub-log induced by surviving E2O *relations*.
 
@@ -104,13 +82,7 @@ def sublog_from_relations(
     objects = ocel.objects().join(
         kept_objects, left_on=s.OCEL_ID, right_on=s.OCEL_OBJECT_ID, how="semi"
     )
-    return prune_log(
-        ocel,
-        events=events,
-        objects=objects,
-        e2o=relations,
-        events_table=events_table,
-    )
+    return prune_log(ocel, events=events, objects=objects, e2o=relations)
 
 
 def sublog_from_event_ids(ocel: OCEL, event_ids: pl.LazyFrame) -> OCEL:
@@ -126,32 +98,24 @@ def sublog_from_object_ids(
     ocel: OCEL,
     object_ids: pl.LazyFrame,
     *,
-    objects_table: OCELTable | None = None,
+    objects: pl.LazyFrame | None = None,
 ) -> OCEL:
     """Build a sub-log from an authoritative ``ocel_object_id`` selection.
 
     Selected objects remain present even when they have no E2O relation. Events
     are induced by the surviving relations, so unrelated events are removed.
+    ``objects`` optionally supplies the already-filtered identity frame.
     """
     relations = ocel.event_object().join(object_ids, on=s.OCEL_OBJECT_ID, how="semi")
     event_ids = relations.select(s.OCEL_EVENT_ID).unique()
     events = ocel.events().join(
         event_ids, left_on=s.OCEL_ID, right_on=s.OCEL_EVENT_ID, how="semi"
     )
-    objects = (
-        objects_table.all()
-        if objects_table is not None
-        else ocel.objects().join(
+    if objects is None:
+        objects = ocel.objects().join(
             object_ids,
             left_on=s.OCEL_ID,
             right_on=s.OCEL_OBJECT_ID,
             how="semi",
         )
-    )
-    return prune_log(
-        ocel,
-        events=events,
-        objects=objects,
-        e2o=relations,
-        objects_table=objects_table,
-    )
+    return prune_log(ocel, events=events, objects=objects, e2o=relations)

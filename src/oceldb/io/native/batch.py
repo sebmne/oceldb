@@ -11,7 +11,7 @@ import pyarrow.parquet as pq
 
 from oceldb import schema as s
 from oceldb.io._paths import DirectoryTransaction
-from oceldb.io._schema import validate_dataset_for_io
+from oceldb.io._schema import validate_frames_for_io
 from oceldb.io.errors import ValidationMode
 from oceldb.io.native.layout import (
     COMPRESSION,
@@ -23,7 +23,7 @@ from oceldb.io.native.layout import (
     NativeTable,
 )
 from oceldb.io.native.manifest import write_manifest
-from oceldb.io.native.storage import staged_dataset
+from oceldb.io.native.storage import scan_native_tables
 from oceldb.schema import OCELSchema, TypeAttributes
 
 
@@ -162,8 +162,8 @@ class NativeBatchSink:
                 writer.path.unlink()
         finally:
             con.close()
-        validate_dataset_for_io(
-            staged_dataset(self.staging),
+        validate_frames_for_io(
+            scan_native_tables(self.staging, self.schema),
             self.validation,
         )
         write_manifest(self.staging, schema=self.schema)

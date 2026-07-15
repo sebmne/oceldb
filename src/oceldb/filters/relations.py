@@ -50,9 +50,4 @@ def filter_o2o_by_qualifier(
             | pl.col(s.OCEL_TARGET_TYPE).is_in(scope)
         ).fill_null(False)
         keep = (~in_scope) | decision
-    table = ocel._dataset.tables.object_object
-    return OCEL(
-        ocel._dataset.with_tables(
-            object_object=table.map_partitions(lambda frame: frame.filter(keep)),
-        )
-    )
+    return ocel._replace(object_object=ocel.object_object().filter(keep))

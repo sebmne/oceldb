@@ -397,8 +397,7 @@ def benchmark_operation(
     if case == "validate":
         return lambda: _validate(log)
     if case == "describe":
-        dataset = log._dataset
-        return lambda: OCEL(dataset).describe().events
+        return lambda: log._replace().describe().events
     if case == "event_count":
         return lambda: _count(log.events())
     if case == "event_materialize":

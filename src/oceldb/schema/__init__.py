@@ -15,7 +15,12 @@ from oceldb.schema._layout import (
     OCEL_TIME,
     OCEL_TYPE,
 )
-from oceldb.schema._types import AttributeType, OCELSchema, TypeAttributes
+from oceldb.schema._types import (
+    AttributeType,
+    OCELSchema,
+    TypeAttributes,
+    widen_shared_attributes,
+)
 
 __all__ = [
     "AttributeType",
@@ -34,4 +39,5 @@ __all__ = [
     "OCEL_TIME",
     "OCEL_TYPE",
     "TypeAttributes",
+    "widen_shared_attributes",
 ]

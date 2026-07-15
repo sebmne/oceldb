@@ -5,7 +5,6 @@ from collections.abc import Mapping
 import polars as pl
 
 from oceldb import schema as s
-from oceldb.core.dataset import OCELDataset
 from oceldb.errors import OCELValidationError
 from oceldb.schema._layout import (
     E2O_SCHEMA,
@@ -16,30 +15,49 @@ from oceldb.schema._layout import (
 )
 
 
-def validate_dataset(dataset: OCELDataset) -> None:
-    """Raise when *dataset* violates canonical logical OCEL invariants.
+def validate_tables(
+    *,
+    events: pl.LazyFrame,
+    objects: pl.LazyFrame,
+    object_changes: pl.LazyFrame,
+    event_object: pl.LazyFrame,
+    object_object: pl.LazyFrame,
+) -> None:
+    """Raise when the tables violate canonical logical OCEL invariants.
 
     Validation executes small lazy queries over identifiers, types, and
     relations. It does not materialize event or object attribute columns.
     """
-    issues = dataset_issues(dataset)
+    issues = table_issues(
+        events=events,
+        objects=objects,
+        object_changes=object_changes,
+        event_object=event_object,
+        object_object=object_object,
+    )
     if issues:
         raise OCELValidationError("Invalid OCEL dataset:\n- " + "\n- ".join(issues))
 
 
-def validate_storage_input(dataset: OCELDataset) -> None:
+def validate_storage_input(
+    *,
+    events: pl.LazyFrame,
+    objects: pl.LazyFrame,
+    object_changes: pl.LazyFrame,
+    event_object: pl.LazyFrame,
+    object_object: pl.LazyFrame,
+) -> None:
     """Validate resolvable logical schemas before physical normalization.
 
     Full identity and relationship validation runs against the staged native
     files after writing.
     """
-    tables = dataset.tables
     frames = {
-        "events": tables.events.all(),
-        "objects": tables.objects.all(),
-        "object_changes": tables.object_changes.all(),
-        "event_object": tables.event_object.all(),
-        "object_object": tables.object_object.all(),
+        "events": events,
+        "objects": objects,
+        "object_changes": object_changes,
+        "event_object": event_object,
+        "object_object": object_object,
     }
     required = {
         "events": EVENTS_SCHEMA,
@@ -57,15 +75,21 @@ def validate_storage_input(dataset: OCELDataset) -> None:
         raise OCELValidationError("Invalid OCEL dataset:\n- " + "\n- ".join(issues))
 
 
-def dataset_issues(dataset: OCELDataset) -> tuple[str, ...]:
-    """Return logical invariant violations found in *dataset*."""
-    source_tables = dataset.tables
+def table_issues(
+    *,
+    events: pl.LazyFrame,
+    objects: pl.LazyFrame,
+    object_changes: pl.LazyFrame,
+    event_object: pl.LazyFrame,
+    object_object: pl.LazyFrame,
+) -> tuple[str, ...]:
+    """Return logical invariant violations found in the five tables."""
     tables: dict[str, pl.LazyFrame] = {
-        "events": source_tables.events.all(),
-        "objects": source_tables.objects.all(),
-        "object_changes": source_tables.object_changes.all(),
-        "event_object": source_tables.event_object.all(),
-        "object_object": source_tables.object_object.all(),
+        "events": events,
+        "objects": objects,
+        "object_changes": object_changes,
+        "event_object": event_object,
+        "object_object": object_object,
     }
     required_schemas = {
         "events": EVENTS_SCHEMA,

@@ -1,12 +1,12 @@
 """Schema resolution and materialization shared by format writers."""
 
+from collections.abc import Mapping
 from dataclasses import dataclass
 
 import polars as pl
 
-from oceldb.core.dataset import OCELDataset, OCELTables
 from oceldb.core.presence import TypeDirectory
-from oceldb.core.validation import dataset_issues
+from oceldb.core.validation import table_issues
 from oceldb.io.errors import ValidationMode, issue
 from oceldb.schema import OCELSchema
 from oceldb.ocel import OCEL
@@ -20,18 +20,6 @@ class MaterializedOCEL:
     e2o: pl.DataFrame
     o2o: pl.DataFrame
     schema: OCELSchema
-
-    def as_dataset(self) -> OCELDataset:
-        """Expose the collected tables through the canonical dataset contract."""
-        return OCELDataset(
-            tables=OCELTables.from_frames(
-                events=self.events.lazy(),
-                objects=self.objects.lazy(),
-                object_changes=self.object_changes.lazy(),
-                event_object=self.e2o.lazy(),
-                object_object=self.o2o.lazy(),
-            ),
-        )
 
 
 def materialize(ocel: OCEL) -> MaterializedOCEL:
@@ -63,13 +51,38 @@ def materialize(ocel: OCEL) -> MaterializedOCEL:
 
 
 def validate_for_exchange(data: MaterializedOCEL, validation: ValidationMode) -> None:
-    """Apply the canonical dataset validator with exchange error semantics."""
-    validate_dataset_for_io(data.as_dataset(), validation)
+    """Apply the canonical table validator with exchange error semantics."""
+    validate_frames_for_io(
+        {
+            "events": data.events.lazy(),
+            "objects": data.objects.lazy(),
+            "object_changes": data.object_changes.lazy(),
+            "event_object": data.e2o.lazy(),
+            "object_object": data.o2o.lazy(),
+        },
+        validation,
+    )
 
 
-def validate_dataset_for_io(dataset: OCELDataset, validation: ValidationMode) -> None:
+def validate_ocel_for_io(ocel: OCEL, validation: ValidationMode) -> None:
+    """Apply canonical validation to an OCEL with strict/warn/none semantics."""
+    validate_frames_for_io(
+        {
+            "events": ocel.events(),
+            "objects": ocel.objects(),
+            "object_changes": ocel.object_changes(),
+            "event_object": ocel.event_object(),
+            "object_object": ocel.object_object(),
+        },
+        validation,
+    )
+
+
+def validate_frames_for_io(
+    frames: Mapping[str, pl.LazyFrame], validation: ValidationMode
+) -> None:
     """Apply canonical validation using strict/warn/none IO semantics."""
     if validation == "none":
         return
-    for message in dataset_issues(dataset):
+    for message in table_issues(**frames):
         issue(validation, message)

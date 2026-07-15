@@ -14,13 +14,14 @@ the epoch-row trick puts initial object state at ``1970-01-01``.
 """
 
 import sqlite3
+from collections.abc import Iterable
 from dataclasses import dataclass
 from pathlib import Path
 from typing import AbstractSet
 
 import duckdb
 from oceldb.io._paths import DirectoryTransaction
-from oceldb.io._schema import validate_dataset_for_io
+from oceldb.io._schema import validate_frames_for_io
 from oceldb.io.errors import ValidationMode, check_validation_mode, issue
 from oceldb.io.native.layout import (
     COMPRESSION,
@@ -31,7 +32,7 @@ from oceldb.io.native.layout import (
     OBJECT_OBJECT,
 )
 from oceldb.io.native.manifest import write_manifest
-from oceldb.io.native.storage import infer_storage_schema, staged_dataset
+from oceldb.io.native.storage import infer_storage_schema, scan_native_tables
 
 _EPOCH = "TIMESTAMPTZ '1970-01-01 00:00:00+00:00'"
 _EVENT_CORE = set(EVENTS.columns)
@@ -109,7 +110,7 @@ def import_sqlite(
             if "object_object" in _table_names(source) and _count(con, "object_object"):
                 _copy(con, _O2O_QUERY, OBJECT_OBJECT.file(staging))
             schema = infer_storage_schema(staging)
-            validate_dataset_for_io(staged_dataset(staging), validation)
+            validate_frames_for_io(scan_native_tables(staging, schema), validation)
             write_manifest(staging, schema=schema)
         finally:
             con.close()
@@ -130,19 +131,24 @@ def _write_events(
 ) -> None:
     base = EVENTS.root(staging)
     base.mkdir()
-    for mapping in _mappings(con, "event_map_type"):
-        attrs = _attribute_columns(source, f"event_{mapping.suffix}", _EVENT_CORE)
+    mappings = _mappings(con, "event_map_type")
+    per_type = {
+        mapping.suffix: _attribute_columns(
+            source, f"event_{mapping.suffix}", _EVENT_CORE
+        )
+        for mapping in mappings
+    }
+    shared = _widened_duckdb_types(per_type.values())
+    for mapping in mappings:
+        attrs = per_type[mapping.suffix]
         table_name = f"event_{mapping.suffix}"
         _check_cast(con, table_name, "ocel_time", "TIMESTAMPTZ", validation)
-        for name, sqlite_type in attrs:
-            _check_cast(con, table_name, name, _duckdb_type(sqlite_type), validation)
+        for name, _ in attrs:
+            _check_cast(con, table_name, name, shared[name], validation)
         columns = [
             "ocel_id",
             f"{cast_function}(ocel_time AS TIMESTAMPTZ) AS ocel_time",
-            *(
-                _cast_expr(name, sqlite_type, cast_function)
-                for name, sqlite_type in attrs
-            ),
+            *(_cast_expr(name, shared[name], cast_function) for name, _ in attrs),
         ]
         output = EVENTS.file(staging, type_name=mapping.type_name)
         output.parent.mkdir()
@@ -167,7 +173,16 @@ def _write_objects_and_changes(
     changes_base = OBJECT_CHANGES.root(staging)
     changes_base.mkdir()
 
-    for mapping in _mappings(con, "object_map_type"):
+    mappings = _mappings(con, "object_map_type")
+    shared = _widened_duckdb_types(
+        [
+            (name, sqlite_type)
+            for name, sqlite_type in _pragma_columns(source, f"object_{mapping.suffix}")
+            if name not in _OBJECT_CHANGE_CORE
+        ]
+        for mapping in mappings
+    )
+    for mapping in mappings:
         object_file = OBJECTS.file(staging, type_name=mapping.type_name)
         object_file.parent.mkdir()
         _copy(
@@ -208,13 +223,10 @@ def _write_objects_and_changes(
             "ocel_id",
             time_expr,
             changed_expr,
-            *(
-                _cast_expr(name, sqlite_type, cast_function)
-                for name, sqlite_type in attrs
-            ),
+            *(_cast_expr(name, shared[name], cast_function) for name, _ in attrs),
         ]
-        for name, sqlite_type in attrs:
-            _check_cast(con, table, name, _duckdb_type(sqlite_type), validation)
+        for name, _ in attrs:
+            _check_cast(con, table, name, shared[name], validation)
         changes_file = OBJECT_CHANGES.file(staging, type_name=mapping.type_name)
         changes_file.parent.mkdir()
         _copy(
@@ -300,8 +312,7 @@ def _pragma_columns(source: Path, table: str) -> list[tuple[str, str]]:
     return [(str(row[1]), str(row[2])) for row in rows]
 
 
-def _cast_expr(column: str, sqlite_type: str, cast_function: str) -> str:
-    duckdb_type = _duckdb_type(sqlite_type)
+def _cast_expr(column: str, duckdb_type: str, cast_function: str) -> str:
     identifier = _quote(column)
     if duckdb_type == "VARCHAR":
         return identifier
@@ -336,6 +347,29 @@ def _check_cast(
             f"SQLite {table}.{column} contains {invalid} value(s) that cannot "
             f"be converted to {target_type}.",
         )
+
+
+def _widened_duckdb_types(
+    groups: Iterable[Iterable[tuple[str, str]]],
+) -> dict[str, str]:
+    """Give attributes shared across per-type tables one physical DuckDB type.
+
+    The native layout unions each partitioned table, so a column reused by
+    several types must agree on its dtype. Numeric conflicts widen to DOUBLE,
+    anything else to VARCHAR.
+    """
+    shared: dict[str, str] = {}
+    for attrs in groups:
+        for name, sqlite_type in attrs:
+            duckdb_type = _duckdb_type(sqlite_type)
+            previous = shared.get(name)
+            if previous is None or previous == duckdb_type:
+                shared[name] = duckdb_type
+            elif {previous, duckdb_type} <= {"BIGINT", "DOUBLE"}:
+                shared[name] = "DOUBLE"
+            else:
+                shared[name] = "VARCHAR"
+    return shared
 
 
 def _duckdb_type(sqlite_type: str) -> str:

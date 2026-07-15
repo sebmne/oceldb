@@ -8,7 +8,6 @@ from collections.abc import Iterable, Mapping
 import polars as pl
 
 from oceldb import schema as s
-from oceldb.core.dataset import OCELDataset, OCELTables
 from oceldb.core.presence import TypeDirectory
 from oceldb.io._schema import materialize, validate_for_exchange
 from oceldb.io._values import encode_attribute, format_datetime, qualifier
@@ -260,7 +259,7 @@ def build_ocel(
     attribute directory so a later export keeps unused declarations. Shared by
     the JSON and XML readers.
     """
-    tables = OCELTables.from_frames(
+    return OCEL(
         events=rows_to_lf(event_rows, EVENTS_SCHEMA)
         if event_rows
         else empty_lf(EVENTS_SCHEMA),
@@ -276,9 +275,6 @@ def build_ocel(
         object_object=rows_to_lf(o2o_rows, O2O_SCHEMA)
         if o2o_rows
         else empty_lf(O2O_SCHEMA),
-    )
-    return OCEL(
-        OCELDataset(tables=tables),
         presence=TypeDirectory.from_schema(schema) if schema is not None else None,
     )
 

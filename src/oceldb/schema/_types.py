@@ -117,3 +117,38 @@ class OCELSchema:
     def __post_init__(self) -> None:
         object.__setattr__(self, "event_types", _freeze_types(self.event_types))
         object.__setattr__(self, "object_types", _freeze_types(self.object_types))
+
+
+def widen_shared_attributes(schema: OCELSchema) -> OCELSchema:
+    """Give attributes shared across types one common declared type.
+
+    The native layout unions each partitioned table into a single logical
+    frame, so an attribute column reused by several event types (or several
+    object types) must carry one physical dtype. Conflicts widen to float for
+    numeric declarations and to string otherwise.
+    """
+    return OCELSchema(
+        event_types=_widen_types(schema.event_types),
+        object_types=_widen_types(schema.object_types),
+    )
+
+
+def _widen_types(
+    types: Mapping[str, TypeAttributes],
+) -> dict[str, dict[str, AttributeType]]:
+    shared: dict[str, AttributeType] = {}
+    for attributes in types.values():
+        for name, attr_type in attributes.items():
+            shared[name] = _widen(shared.get(name), attr_type)
+    return {
+        type_name: {name: shared[name] for name in attributes}
+        for type_name, attributes in types.items()
+    }
+
+
+def _widen(previous: AttributeType | None, current: AttributeType) -> AttributeType:
+    if previous is None or previous == current:
+        return current
+    if {previous, current} <= {AttributeType.INTEGER, AttributeType.FLOAT}:
+        return AttributeType.FLOAT
+    return AttributeType.STRING

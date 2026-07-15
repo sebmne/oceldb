@@ -12,12 +12,14 @@ log/
   object_object.parquet
 ```
 
-``ocel_type`` is encoded in partition directory names and is re-attached as a
-regular column when reading. The per-type files therefore store only the core
-columns and type-specific attributes.
+The partitioned tables are opened as one hive scan each: ``ocel_type`` comes
+from the partition directory names, the union column schema comes from the
+manifest, and per-type files only store the columns their type declares.
+Type predicates are pruned to the matching partition files by the query
+optimizer. An attribute column shared by several types must therefore carry
+one dtype across partitions; writers widen conflicting declarations.
 """
 
-from collections.abc import Mapping
 from pathlib import Path
 import shutil
 from typing import cast
@@ -25,12 +27,8 @@ from typing import cast
 import polars as pl
 
 from oceldb import schema as s
-from oceldb.core.dataset import (
-    OCELDataset,
-    OCELTable,
-    OCELTables,
-)
-from oceldb.core.validation import validate_dataset, validate_storage_input
+from oceldb.core.presence import TypeDirectory
+from oceldb.core.validation import validate_storage_input, validate_tables
 from oceldb.errors import OCELDBError
 from oceldb.io._paths import DirectoryTransaction
 from oceldb.io.native.layout import (
@@ -47,181 +45,148 @@ from oceldb.io.native.layout import (
     validate_native_layout,
 )
 from oceldb.io.native.manifest import read_manifest, write_manifest
-from oceldb.schema import AttributeType, OCELSchema, TypeAttributes
+from oceldb.ocel import OCEL
+from oceldb.schema import (
+    AttributeType,
+    OCELSchema,
+    TypeAttributes,
+    widen_shared_attributes,
+)
+from collections.abc import Mapping
 
 
-def open_native(path: str | Path) -> tuple[OCELDataset, OCELSchema]:
-    """Open a native dataset as typed lazy frames plus its declared schema."""
+def open_native(path: str | Path) -> OCEL:
+    """Open a native dataset as lazy hive scans seeded with its schema."""
     base = Path(path).resolve()
     if not base.is_dir():
         raise FileNotFoundError(f"Native oceldb directory not found: {base}")
     manifest = read_manifest(base)
     validate_native_layout(base, manifest.schema)
-    return staged_dataset(base, metadata=manifest.metadata), manifest.schema
-
-
-def staged_dataset(
-    path: str | Path,
-    *,
-    metadata: Mapping[str, object] | None = None,
-) -> OCELDataset:
-    """Scan complete native tables before their manifest is committed."""
-    base = Path(path).resolve()
-    event_partitions = _scan_partitions(base, EVENTS)
-    object_partitions = _scan_partitions(base, OBJECTS)
-    change_partitions = _scan_partitions(base, OBJECT_CHANGES)
-    return OCELDataset(
-        tables=OCELTables(
-            events=OCELTable(
-                _union_partitions(event_partitions, EVENTS),
-                partitions=event_partitions,
-                source=EVENTS.root(base),
-            ),
-            objects=OCELTable(
-                _union_partitions(object_partitions, OBJECTS),
-                partitions=object_partitions,
-                source=OBJECTS.root(base),
-            ),
-            object_changes=OCELTable(
-                _union_partitions(change_partitions, OBJECT_CHANGES),
-                partitions=change_partitions,
-                source=OBJECT_CHANGES.root(base),
-            ),
-            event_object=OCELTable(
-                _scan_relation(base, EVENT_OBJECT),
-                source=EVENT_OBJECT.root(base),
-            ),
-            object_object=OCELTable(
-                _scan_relation(base, OBJECT_OBJECT),
-                source=OBJECT_OBJECT.root(base),
-            ),
-        ),
-        metadata=metadata or {},
+    return OCEL(
+        **scan_native_tables(base, manifest.schema),
+        metadata=manifest.metadata,
+        presence=TypeDirectory.from_schema(manifest.schema),
+        source=base,
     )
 
 
+def scan_native_tables(
+    path: str | Path, declared: OCELSchema
+) -> dict[str, pl.LazyFrame]:
+    """Scan the five native tables using the declared union schemas."""
+    base = Path(path).resolve()
+    return {
+        "events": _scan_typed(base, EVENTS, declared.event_types),
+        "objects": _scan_typed(
+            base, OBJECTS, {name: {} for name in declared.object_types}
+        ),
+        "object_changes": _scan_typed(base, OBJECT_CHANGES, declared.object_types),
+        "event_object": _scan_relation(base, EVENT_OBJECT),
+        "object_object": _scan_relation(base, OBJECT_OBJECT),
+    }
+
+
 def write_native(
-    dataset: OCELDataset,
+    ocel: OCEL,
     path: str | Path,
     *,
-    declared: OCELSchema | None = None,
     overwrite: bool = False,
 ) -> None:
-    """Transactionally write a typed dataset in the native Parquet layout.
+    """Transactionally write an OCEL in the native Parquet layout.
 
-    ``declared`` fixes the manifest's types and per-type attribute columns;
-    without it both are inferred from the staged partitions.
+    A pristine opened dataset is copied verbatim. Otherwise the manifest
+    declares the log's attribute directory, with attributes shared across
+    types widened to one common dtype.
     """
     try:
-        _write_dataset(dataset, Path(path), declared=declared, overwrite=overwrite)
+        _write_dataset(ocel, Path(path), overwrite=overwrite)
     except (OCELDBError, OSError):
         raise
     except Exception as exc:
         raise NativeStorageError(f"Cannot write native dataset {path}: {exc}") from exc
 
 
-def _write_dataset(
-    dataset: OCELDataset,
-    base: Path,
-    *,
-    declared: OCELSchema | None,
-    overwrite: bool,
-) -> None:
-    validate_storage_input(dataset)
-    tables = dataset.tables
+def _write_dataset(ocel: OCEL, base: Path, *, overwrite: bool) -> None:
+    source = ocel._source
+    if source is not None:
+        with DirectoryTransaction(base, overwrite=overwrite) as staging:
+            shutil.copytree(source, staging, dirs_exist_ok=True)
+        return
 
+    validate_storage_input(
+        events=ocel.events(),
+        objects=ocel.objects(),
+        object_changes=ocel.object_changes(),
+        event_object=ocel.event_object(),
+        object_object=ocel.object_object(),
+    )
+    declared = widen_shared_attributes(ocel._directory().to_schema())
     with DirectoryTransaction(base, overwrite=overwrite) as staging:
-        _persist_partitioned(
-            tables.events,
-            staging,
-            EVENTS,
-            declared.event_types if declared is not None else None,
-        )
-        _persist_partitioned(
-            tables.objects,
+        _write_partitioned(ocel.events(), staging, EVENTS, declared.event_types)
+        _write_partitioned(
+            ocel.objects(),
             staging,
             OBJECTS,
-            {name: {} for name in declared.object_types}
-            if declared is not None
-            else None,
+            {name: {} for name in declared.object_types},
         )
-        _persist_partitioned(
-            tables.object_changes,
-            staging,
-            OBJECT_CHANGES,
-            declared.object_types if declared is not None else None,
+        _write_partitioned(
+            ocel.object_changes(), staging, OBJECT_CHANGES, declared.object_types
         )
-        _persist_relation(tables.event_object, staging, EVENT_OBJECT)
-        _persist_relation(tables.object_object, staging, OBJECT_OBJECT)
-        storage_schema = (
-            declared if declared is not None else infer_storage_schema(staging)
-        )
-        validate_native_layout(staging, storage_schema)
-        validate_dataset(staged_dataset(staging, metadata=dataset.metadata))
-        write_manifest(
-            staging,
-            schema=storage_schema,
-            metadata=dataset.metadata,
-        )
+        _write_relation(ocel.event_object(), staging, EVENT_OBJECT)
+        _write_relation(ocel.object_object(), staging, OBJECT_OBJECT)
+        validate_native_layout(staging, declared)
+        validate_tables(**scan_native_tables(staging, declared))
+        write_manifest(staging, schema=declared, metadata=ocel.metadata)
 
 
-def _persist_partitioned(
-    data: OCELTable,
-    target: Path,
+def _scan_typed(
+    base: Path,
     table: NativeTable,
-    declared_types: Mapping[str, TypeAttributes] | None,
-) -> None:
-    if data.source is not None:
-        _copy_source(data.source, table.root(target), partitioned=True)
-        return
-    _write_partitioned(
-        data.all(),
-        target,
-        table,
-        declared_types,
-        data.partitions,
+    declared_types: Mapping[str, TypeAttributes],
+) -> pl.LazyFrame:
+    union = _union_schema(table, declared_types)
+    if not _partition_files(base, table):
+        return pl.LazyFrame(schema={**union, s.OCEL_TYPE: pl.String()})
+    return pl.scan_parquet(
+        table.root(base) / "**" / "*.parquet",
+        hive_partitioning=True,
+        hive_schema={s.OCEL_TYPE: pl.String()},
+        schema=union,
+        missing_columns="insert",
     )
 
 
-def _persist_relation(data: OCELTable, target: Path, table: NativeTable) -> None:
-    if data.source is not None:
-        _copy_source(data.source, table.root(target), partitioned=False)
-        return
-    _write_relation(data.all(), target, table)
+def _union_schema(
+    table: NativeTable,
+    declared_types: Mapping[str, TypeAttributes],
+) -> dict[str, pl.DataType]:
+    """Union the declared per-type columns, rejecting physical conflicts."""
+    result: dict[str, pl.DataType] = dict(table.base_schema)
+    for type_name, attributes in declared_types.items():
+        for name, attr_type in attributes.items():
+            dtype = attr_type.polars_dtype()
+            previous = result.get(name)
+            if previous is not None and previous != dtype:
+                raise NativeStorageError(
+                    f"Native table {table.key!r} declares attribute {name!r} "
+                    f"with conflicting types ({previous!r} vs {dtype!r} in "
+                    f"{type_name!r}). Rewrite the dataset with a current "
+                    "oceldb version to widen shared attributes."
+                )
+            result[name] = dtype
+    return result
 
 
-def _copy_source(source_path: Path, target_path: Path, *, partitioned: bool) -> None:
-    """Copy an unchanged validated native table into a transaction."""
-    if partitioned:
-        shutil.copytree(source_path, target_path)
-    elif source_path.exists():
-        shutil.copyfile(source_path, target_path)
-
-
-def _scan_partitions(base: Path, table: NativeTable) -> dict[str, pl.LazyFrame]:
+def _partition_files(base: Path, table: NativeTable) -> list[Path]:
     base_dir = table.root(base)
-    partitions: dict[str, pl.LazyFrame] = {}
-    if base_dir.is_dir():
-        for child in sorted(base_dir.iterdir()):
-            if not child.is_dir() or not child.name.startswith(PARTITION_PREFIX):
-                continue
-            encoded = child.name.removeprefix(PARTITION_PREFIX)
-            type_name = decode_type_name(encoded)
-            file = table.file(base, type_name=type_name)
-            if not file.exists():
-                continue
-            partitions[type_name] = pl.scan_parquet(file).with_columns(
-                pl.lit(type_name, dtype=pl.String()).alias(s.OCEL_TYPE)
-            )
-    return partitions
-
-
-def _union_partitions(
-    partitions: Mapping[str, pl.LazyFrame], table: NativeTable
-) -> pl.LazyFrame:
-    if not partitions:
-        return pl.LazyFrame(schema={**table.base_schema, s.OCEL_TYPE: pl.String()})
-    return pl.concat(list(partitions.values()), how="diagonal_relaxed")
+    if not base_dir.is_dir():
+        return []
+    return [
+        file
+        for child in sorted(base_dir.iterdir())
+        if child.is_dir() and child.name.startswith(PARTITION_PREFIX)
+        for file in sorted(child.glob("*.parquet"))
+    ]
 
 
 def _scan_relation(base: Path, table: NativeTable) -> pl.LazyFrame:
@@ -235,34 +200,18 @@ def _write_partitioned(
     frame: pl.LazyFrame,
     base: Path,
     table: NativeTable,
-    declared_types: Mapping[str, TypeAttributes] | None,
-    partitions: Mapping[str, pl.LazyFrame] | None,
+    declared_types: Mapping[str, TypeAttributes],
 ) -> None:
     base_dir = table.root(base)
     base_dir.mkdir(parents=True)
-    observed = (
-        set(partitions) if partitions is not None else set(_distinct_types(frame))
-    )
-    type_names = observed | (
-        set(declared_types) if declared_types is not None else set()
-    )
+    type_names = set(_distinct_types(frame)) | set(declared_types)
     for type_name in sorted(type_names):
-        typed = (
-            partitions[type_name]
-            if partitions is not None and type_name in partitions
-            else frame.filter(pl.col(s.OCEL_TYPE) == type_name)
+        typed = frame.filter(pl.col(s.OCEL_TYPE) == type_name)
+        attributes = (
+            declared_types[type_name]
+            if type_name in declared_types
+            else _present_attributes(typed, table)
         )
-        if declared_types is None:
-            attributes = _present_attributes(typed, table)
-        elif type_name in declared_types:
-            attributes = declared_types[type_name]
-        else:
-            # Filters retain per-type plans for types they emptied out; an
-            # undeclared partition only carries data when the declaration was
-            # inconsistent, so keep it and let layout validation report that.
-            if typed.limit(1).collect().height == 0:
-                continue
-            attributes = _present_attributes(typed, table)
         output = _prepare_frame(typed.drop(s.OCEL_TYPE), table, attributes)
         file = table.file(base, type_name=type_name)
         file.parent.mkdir()
@@ -306,7 +255,7 @@ def _prepare_frame(
 def _present_attributes(
     frame: pl.LazyFrame, table: NativeTable
 ) -> dict[str, AttributeType]:
-    """Infer populated attributes for a schema-less typed frame."""
+    """Infer populated attributes for an undeclared typed frame."""
     schema = frame.collect_schema()
     candidates = [
         name

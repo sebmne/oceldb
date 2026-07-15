@@ -38,18 +38,10 @@ def filter_events_by_attribute(
         scope=normalize_scope(event_types),
         mode=mode,
     )
-    events_table = ocel._dataset.tables.events.map_partitions(
-        lambda frame: frame.filter(keep)
-    )
-    events = events_table.all()
+    events = ocel.events().filter(keep)
     event_ids = events.select(pl.col(s.OCEL_ID).alias(s.OCEL_EVENT_ID))
     relations = ocel.event_object().join(event_ids, on=s.OCEL_EVENT_ID, how="semi")
-    return sublog_from_relations(
-        ocel,
-        relations,
-        events=events,
-        events_table=events_table,
-    )
+    return sublog_from_relations(ocel, relations, events=events)
 
 
 @step
@@ -76,17 +68,11 @@ def filter_events_by_type(
 ) -> OCEL:
     """Keep or remove events whose ``ocel_type`` is in ``types``."""
     keep = match_decision(pl.col(s.OCEL_EVENT_TYPE).is_in(list(types)), mode)
-    events_table = ocel._dataset.tables.events.filter_types(
-        types,
-        include=mode == "include",
+    events = ocel.events().filter(
+        match_decision(pl.col(s.OCEL_TYPE).is_in(list(types)), mode)
     )
     relations = ocel.event_object().filter(keep)
-    return sublog_from_relations(
-        ocel,
-        relations,
-        events=events_table.all(),
-        events_table=events_table,
-    )
+    return sublog_from_relations(ocel, relations, events=events)
 
 
 @step

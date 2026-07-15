@@ -134,15 +134,9 @@ def _sample_ids(
 
 def _filter_objects_direct(ocel: OCEL, predicate: pl.Expr) -> OCEL:
     """Filter object identities and prune around that authoritative selection."""
-    objects_table = ocel._dataset.tables.objects.map_partitions(
-        lambda frame: frame.filter(predicate)
-    )
-    satisfying = objects_table.all().select(pl.col(s.OCEL_ID).alias(s.OCEL_OBJECT_ID))
-    return sublog_from_object_ids(
-        ocel,
-        satisfying,
-        objects_table=objects_table,
-    )
+    objects = ocel.objects().filter(predicate)
+    satisfying = objects.select(pl.col(s.OCEL_ID).alias(s.OCEL_OBJECT_ID))
+    return sublog_from_object_ids(ocel, satisfying, objects=objects)
 
 
 def _validate_count(name: str, value: object) -> None:

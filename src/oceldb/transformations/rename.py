@@ -5,7 +5,6 @@ from collections.abc import Mapping
 import polars as pl
 
 from oceldb import schema as s
-from oceldb.core.dataset import OCELTable
 from oceldb.core.step import step
 from oceldb.ocel import OCEL
 
@@ -45,54 +44,33 @@ def rename_types(
     object_map = _normalize_mapping("objects", objects)
     if event_map is None and object_map is None:
         raise ValueError("Pass a non-empty events or objects mapping.")
-    tables = ocel._dataset.tables
-    return OCEL(
-        ocel._dataset.with_tables(
-            events=_remap_table(
-                tables.events,
-                s.OCEL_TYPE,
-                event_map,
-                partition_names=event_map,
-            ),
-            objects=_remap_table(
-                tables.objects,
-                s.OCEL_TYPE,
-                object_map,
-                partition_names=object_map,
-            ),
-            object_changes=_remap_table(
-                tables.object_changes,
-                s.OCEL_TYPE,
-                object_map,
-                partition_names=object_map,
-            ),
-            event_object=_remap_table(
-                _remap_table(tables.event_object, s.OCEL_EVENT_TYPE, event_map),
-                s.OCEL_OBJECT_TYPE,
-                object_map,
-            ),
-            object_object=_remap_table(
-                _remap_table(tables.object_object, s.OCEL_SOURCE_TYPE, object_map),
-                s.OCEL_TARGET_TYPE,
-                object_map,
-            ),
-        )
+    return ocel._replace(
+        events=_remap(ocel.events(), {s.OCEL_TYPE: event_map}),
+        objects=_remap(ocel.objects(), {s.OCEL_TYPE: object_map}),
+        object_changes=_remap(ocel.object_changes(), {s.OCEL_TYPE: object_map}),
+        event_object=_remap(
+            ocel.event_object(),
+            {s.OCEL_EVENT_TYPE: event_map, s.OCEL_OBJECT_TYPE: object_map},
+        ),
+        object_object=_remap(
+            ocel.object_object(),
+            {s.OCEL_SOURCE_TYPE: object_map, s.OCEL_TARGET_TYPE: object_map},
+        ),
     )
 
 
-def _remap_table(
-    table: OCELTable,
-    column: str,
-    mapping: dict[str, str] | None,
-    *,
-    partition_names: dict[str, str] | None = None,
-) -> OCELTable:
-    if not mapping:
-        return table
-    return table.map_partitions(
-        lambda frame: frame.with_columns(pl.col(column).replace(mapping)),
-        names=partition_names,
-    )
+def _remap(
+    frame: pl.LazyFrame,
+    columns: Mapping[str, dict[str, str] | None],
+) -> pl.LazyFrame:
+    replacements = [
+        pl.col(column).replace(mapping)
+        for column, mapping in columns.items()
+        if mapping
+    ]
+    if not replacements:
+        return frame
+    return frame.with_columns(replacements)
 
 
 def _normalize_mapping(name: str, mapping: object) -> dict[str, str] | None:

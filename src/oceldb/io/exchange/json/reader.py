@@ -9,7 +9,7 @@ import ijson
 from oceldb import schema as s
 from oceldb.io._values import coerce_attribute, parse_datetime
 from oceldb.io.errors import ValidationMode, check_validation_mode, io_boundary, issue
-from oceldb.io._schema import validate_dataset_for_io
+from oceldb.io._schema import validate_ocel_for_io
 from oceldb.io.exchange._common import (
     EPOCH,
     EPOCH_DATETIME,
@@ -29,7 +29,7 @@ def read_json(path: str | Path, *, validation: ValidationMode = "strict") -> OCE
     with io_boundary("read JSON OCEL from", path):
         parser = JSONParser(path, validation=validation)
         ocel = collect_parsed(parser.schema, parser.objects(), parser.events())
-        validate_dataset_for_io(ocel._dataset, validation)
+        validate_ocel_for_io(ocel, validation)
         return ocel
 
 

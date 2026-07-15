@@ -117,9 +117,8 @@ def filter_objects_by_type(
 ) -> OCEL:
     """Keep or remove objects whose ``ocel_type`` is in ``types``."""
     keep = match_decision(pl.col(s.OCEL_OBJECT_TYPE).is_in(list(types)), mode)
-    objects_table = ocel._dataset.tables.objects.filter_types(
-        types,
-        include=mode == "include",
+    objects = ocel.objects().filter(
+        match_decision(pl.col(s.OCEL_TYPE).is_in(list(types)), mode)
     )
     relations = ocel.event_object().filter(keep)
     kept_events = relations.select(s.OCEL_EVENT_ID).unique()
@@ -129,19 +128,7 @@ def filter_objects_by_type(
         right_on=s.OCEL_EVENT_ID,
         how="semi",
     )
-    result = prune_log(
-        ocel,
-        events=events,
-        objects=objects_table.all(),
-        e2o=relations,
-        objects_table=objects_table,
-    )
-    changes = result._dataset.tables.object_changes.filter_types(
-        types,
-        include=mode == "include",
-    )
-    dataset = result._dataset.with_tables(object_changes=changes)
-    return OCEL(dataset)
+    return prune_log(ocel, events=events, objects=objects, e2o=relations)
 
 
 @step
