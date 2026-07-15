@@ -5,7 +5,8 @@ from collections.abc import Mapping
 import polars as pl
 
 from oceldb import schema as s
-from oceldb.utils.step import step
+from oceldb.core.dataset import OCELTable
+from oceldb.core.step import step
 from oceldb.ocel import OCEL
 
 
@@ -31,37 +32,81 @@ def rename_types(
     Returns:
         A new ``OCEL`` with the requested type names replaced.
 
+    Raises:
+        ValueError: If both mappings are omitted or empty, or a type name is
+            empty.
+
     Examples:
         >>> from oceldb.transformations import rename_types
         >>> renamed = rename_types(ocel, events={"place order": "Place Order"})
         >>> renamed = ocel >> rename_types(objects={"orders": "Order"})
     """
-    event_map = dict(events) if events else None
-    object_map = dict(objects) if objects else None
-    return OCEL.from_frames(
-        events=_remap(ocel.events(), s.OCEL_TYPE, event_map),
-        objects=_remap(ocel.objects(), s.OCEL_TYPE, object_map),
-        object_changes=_remap(ocel.object_changes(), s.OCEL_TYPE, object_map),
-        event_object=_remap(
-            _remap(ocel.event_object(), s.OCEL_EVENT_TYPE, event_map),
-            s.OCEL_OBJECT_TYPE,
-            object_map,
-        ),
-        object_object=_remap(
-            _remap(ocel.object_object(), s.OCEL_SOURCE_TYPE, object_map),
-            s.OCEL_TARGET_TYPE,
-            object_map,
-        ),
-        schema=ocel.schema.rename(events=event_map, objects=object_map)
-        if ocel.schema is not None
-        else None,
-        metadata=ocel.metadata,
+    event_map = _normalize_mapping("events", events)
+    object_map = _normalize_mapping("objects", objects)
+    if event_map is None and object_map is None:
+        raise ValueError("Pass a non-empty events or objects mapping.")
+    tables = ocel._dataset.tables
+    return OCEL(
+        ocel._dataset.with_tables(
+            events=_remap_table(
+                tables.events,
+                s.OCEL_TYPE,
+                event_map,
+                partition_names=event_map,
+            ),
+            objects=_remap_table(
+                tables.objects,
+                s.OCEL_TYPE,
+                object_map,
+                partition_names=object_map,
+            ),
+            object_changes=_remap_table(
+                tables.object_changes,
+                s.OCEL_TYPE,
+                object_map,
+                partition_names=object_map,
+            ),
+            event_object=_remap_table(
+                _remap_table(tables.event_object, s.OCEL_EVENT_TYPE, event_map),
+                s.OCEL_OBJECT_TYPE,
+                object_map,
+            ),
+            object_object=_remap_table(
+                _remap_table(tables.object_object, s.OCEL_SOURCE_TYPE, object_map),
+                s.OCEL_TARGET_TYPE,
+                object_map,
+            ),
+        )
     )
 
 
-def _remap(
-    frame: pl.LazyFrame, column: str, mapping: dict[str, str] | None
-) -> pl.LazyFrame:
+def _remap_table(
+    table: OCELTable,
+    column: str,
+    mapping: dict[str, str] | None,
+    *,
+    partition_names: dict[str, str] | None = None,
+) -> OCELTable:
     if not mapping:
-        return frame
-    return frame.with_columns(pl.col(column).replace(mapping))
+        return table
+    return table.map_partitions(
+        lambda frame: frame.with_columns(pl.col(column).replace(mapping)),
+        names=partition_names,
+    )
+
+
+def _normalize_mapping(name: str, mapping: object) -> dict[str, str] | None:
+    if mapping is None:
+        return None
+    if not isinstance(mapping, Mapping):
+        raise TypeError(f"{name} must be a mapping or None.")
+    result: dict[str, str] = {}
+    for source, target in mapping.items():
+        if not isinstance(source, str) or not isinstance(target, str):
+            raise TypeError(f"{name} mappings must contain only strings.")
+        if not source or not target:
+            raise ValueError(f"{name} mappings must not contain empty type names.")
+        result[source] = target
+    if not result:
+        return None
+    return result

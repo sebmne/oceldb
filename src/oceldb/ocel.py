@@ -6,16 +6,17 @@ from typing import Any, TypeVar
 import polars as pl
 
 from oceldb import schema as s
-from oceldb.core.dataset import OCELDataset, OCELFrames
-from oceldb.core.frames import concat_unique, reconstruct_object_states, select_types
+from oceldb.core.dataset import OCELDataset, OCELTables
+from oceldb.core.frames import concat_unique, reconstruct_object_states
 from oceldb.core.inspection import (
     OCELSummary,
     describe_frames,
     html_repr,
     text_repr,
 )
+from oceldb.core.presence import TypeDirectory
 from oceldb.core.sql import execute_sql
-from oceldb.schema import OCELSchema
+from oceldb.schema._layout import EVENT_CORE, CHANGE_CORE
 
 _T = TypeVar("_T")
 
@@ -23,16 +24,28 @@ _T = TypeVar("_T")
 class OCEL:
     """An OCEL 2.0 log exposed as lazy Polars dataframes.
 
-    The constructor trusts its input schemas and performs no integrity checks.
-    Accessors remain lazy except for the presence query used to omit all-null
-    attributes from type-specific event and change views.
+    The constructor trusts its input frames and performs no integrity checks.
+    Accessors remain lazy. Type-specific accessors return only the attribute
+    columns belonging to the selected types: declared columns for logs opened
+    or read at an IO boundary, observed non-null columns otherwise.
     """
 
-    __slots__ = ("_dataset",)
+    __slots__ = ("_dataset", "_summary", "_presence")
 
-    def __init__(self, dataset: OCELDataset) -> None:
-        """Build the user-facing façade over a canonical dataset."""
+    def __init__(
+        self,
+        dataset: OCELDataset,
+        *,
+        presence: TypeDirectory | None = None,
+    ) -> None:
+        """Build the user-facing façade over a canonical dataset.
+
+        ``presence`` seeds the per-type attribute directory with declared IO
+        types; without it the directory is probed from the data on demand.
+        """
         self._dataset = dataset
+        self._summary: OCELSummary | None = None
+        self._presence = presence
 
     @classmethod
     def from_frames(
@@ -43,37 +56,21 @@ class OCEL:
         object_changes: pl.LazyFrame,
         event_object: pl.LazyFrame,
         object_object: pl.LazyFrame,
-        schema: OCELSchema | None = None,
         metadata: Mapping[str, Any] | None = None,
     ) -> "OCEL":
-        """Build a canonical dataset from five explicitly named lazy frames.
-
-        ``schema`` preserves declared types and all-null attributes during
-        exchange; writers infer it from observed values when omitted.
-        """
+        """Build a canonical dataset from five explicitly named lazy frames."""
         return cls(
             OCELDataset(
-                frames=OCELFrames(
+                tables=OCELTables.from_frames(
                     events=events,
                     objects=objects,
                     object_changes=object_changes,
                     event_object=event_object,
                     object_object=object_object,
                 ),
-                schema=schema,
                 metadata=metadata or {},
             ),
         )
-
-    @property
-    def dataset(self) -> OCELDataset:
-        """The canonical typed dataset backing this façade."""
-        return self._dataset
-
-    @property
-    def schema(self) -> OCELSchema | None:
-        """Declared type metadata, or ``None`` when it must be inferred."""
-        return self._dataset.schema
 
     @property
     def metadata(self) -> Mapping[str, Any]:
@@ -83,33 +80,41 @@ class OCEL:
     def events(self, *types: str) -> pl.LazyFrame:
         """Return events, optionally filtered by type.
 
-        Type-specific views omit attributes that are entirely null.
+        With ``types``, the result carries only the attribute columns those
+        event types actually have. Native datasets read only the requested
+        type partitions.
         """
         if not types:
-            return self._dataset.frames.events
-        return select_types(
-            self._dataset.frames.events, types, (s.OCEL_ID, s.OCEL_TIME)
+            return self._dataset.tables.events.all()
+        return self._dataset.tables.events.select(
+            types,
+            EVENT_CORE,
+            attributes=self._directory().event_attributes(types),
         )
 
     def objects(self, *types: str) -> pl.LazyFrame:
         """Return object identities, optionally filtered by type."""
         if not types:
-            return self._dataset.frames.objects
-        return self._dataset.frames.objects.filter(
-            pl.col(s.OCEL_TYPE).is_in(list(types))
+            return self._dataset.tables.objects.all()
+        return self._dataset.tables.objects.select(
+            types,
+            (s.OCEL_ID,),
+            attributes=(),
         )
 
     def object_changes(self, *types: str) -> pl.LazyFrame:
         """Return sparse attribute changes, optionally filtered by object type.
 
-        Use :meth:`object_states` for forward-filled point-in-time states.
+        With ``types``, the result carries only the attribute columns those
+        object types actually have. Use :meth:`object_states` for
+        forward-filled point-in-time states.
         """
         if not types:
-            return self._dataset.frames.object_changes
-        return select_types(
-            self._dataset.frames.object_changes,
+            return self._dataset.tables.object_changes.all()
+        return self._dataset.tables.object_changes.select(
             types,
-            (s.OCEL_ID, s.OCEL_TIME, s.OCEL_CHANGED_FIELD),
+            CHANGE_CORE,
+            attributes=self._directory().object_attributes(types),
         )
 
     def object_states(self, *types: str) -> pl.LazyFrame:
@@ -120,65 +125,98 @@ class OCEL:
         events, while synthetic epoch states have no causing event.
         """
         return reconstruct_object_states(
-            self._dataset.frames.object_changes,
-            self._dataset.frames.events,
-            self._dataset.frames.event_object,
+            self.object_changes(*types),
+            self._dataset.tables.events.all(),
+            self._dataset.tables.event_object.all(),
             types,
         )
 
     def event_object(self) -> pl.LazyFrame:
         """Return event-to-object relations."""
-        return self._dataset.frames.event_object
+        return self._dataset.tables.event_object.all()
 
     def object_object(self) -> pl.LazyFrame:
         """Return object-to-object relations."""
-        return self._dataset.frames.object_object
+        return self._dataset.tables.object_object.all()
 
     def describe(self) -> OCELSummary:
         """Materialize row/type counts and event time bounds.
 
         This is the programmatic counterpart to the text representation.
+        The immutable result is cached because an OCEL's lazy dataset does not
+        change after construction.
         """
-        return describe_frames(
-            self._dataset.frames.events,
-            self._dataset.frames.objects,
-            self._dataset.frames.object_changes,
-            self._dataset.frames.event_object,
-            self._dataset.frames.object_object,
+        if self._summary is None:
+            self._summary = describe_frames(
+                self._dataset.tables.events.all(),
+                self._dataset.tables.objects.all(),
+                self._dataset.tables.object_changes.all(),
+                self._dataset.tables.event_object.all(),
+                self._dataset.tables.object_object.all(),
+            )
+        return self._summary
+
+    def validate(self) -> None:
+        """Validate logical columns, identities, types, and relationships."""
+        from oceldb.core.validation import validate_dataset
+
+        validate_dataset(self._dataset)
+
+    def materialize(self) -> "OCEL":
+        """Execute all five lazy tables once and return an in-memory OCEL.
+
+        This is useful after constructing a sub-OCEL that will feed several
+        independent operations. Merely assigning a filtered OCEL to a variable
+        retains its lazy plans, so every later collection evaluates those plans
+        again. Materialization pays that cost once while preserving the same
+        lazy Polars accessor API on the returned OCEL.
+        """
+        frames = pl.collect_all(
+            [
+                self.events(),
+                self.objects(),
+                self.object_changes(),
+                self.event_object(),
+                self.object_object(),
+            ]
         )
+        result = OCEL.from_frames(
+            events=frames[0].lazy(),
+            objects=frames[1].lazy(),
+            object_changes=frames[2].lazy(),
+            event_object=frames[3].lazy(),
+            object_object=frames[4].lazy(),
+            metadata=self.metadata,
+        )
+        result._summary = self._summary
+        result._presence = self._presence
+        return result
 
     def __rshift__(self, step: Callable[["OCEL"], _T]) -> _T:
         """Apply a step, enabling ``ocel >> step(...)`` pipeline syntax."""
         return step(self)
 
     def __repr__(self) -> str:
-        return text_repr(
-            self._dataset.frames.events,
-            self._dataset.frames.objects,
-            self._dataset.frames.object_changes,
-            self._dataset.frames.event_object,
-            self._dataset.frames.object_object,
-        )
+        return text_repr(self.describe())
 
     def _repr_html_(self) -> str:
-        return html_repr(
-            self._dataset.frames.events,
-            self._dataset.frames.objects,
-            self._dataset.frames.object_changes,
-            self._dataset.frames.event_object,
-            self._dataset.frames.object_object,
-        )
+        return html_repr(self.describe())
 
     @classmethod
     def open(cls, path: str | Path) -> "OCEL":
         """Open a native oceldb Parquet directory as lazy scans.
 
+        The manifest, type partitions, and Parquet schemas are validated
+        eagerly; row data remains lazy. The manifest's declared types seed the
+        attribute directory, so type-specific accessors stay fully lazy.
+
         Use :func:`oceldb.io.import_ocel` to persist an exchange file; the
         format-specific readers are available for one-off in-memory reads.
         """
-        from oceldb.io.native import open_native
+        from oceldb.io.native.storage import open_native
 
-        return cls(open_native(path))
+        dataset, declared = open_native(path)
+        return cls(dataset, presence=TypeDirectory.from_schema(declared))
 
     @classmethod
     def merge(cls, *ocels: "OCEL") -> "OCEL":
@@ -191,30 +229,32 @@ class OCEL:
             raise ValueError("merge requires at least one OCEL.")
         return cls.from_frames(
             events=concat_unique(
-                [o.dataset.frames.events for o in ocels], subset=[s.OCEL_ID]
+                [o._dataset.tables.events.all() for o in ocels], subset=[s.OCEL_ID]
             ),
             objects=concat_unique(
-                [o.dataset.frames.objects for o in ocels], subset=[s.OCEL_ID]
+                [o._dataset.tables.objects.all() for o in ocels], subset=[s.OCEL_ID]
             ),
             object_changes=concat_unique(
-                [o.dataset.frames.object_changes for o in ocels], subset=None
+                [o._dataset.tables.object_changes.all() for o in ocels], subset=None
             ),
             object_object=concat_unique(
-                [o.dataset.frames.object_object for o in ocels], subset=None
+                [o._dataset.tables.object_object.all() for o in ocels], subset=None
             ),
             event_object=concat_unique(
-                [o.dataset.frames.event_object for o in ocels], subset=None
+                [o._dataset.tables.event_object.all() for o in ocels], subset=None
             ),
-            schema=OCELSchema.merge(*(o.schema for o in ocels if o.schema is not None))
-            if any(o.schema is not None for o in ocels)
-            else None,
         )
 
     def write(self, target: str | Path, *, overwrite: bool = False) -> None:
-        """Materialize and atomically write the native Parquet layout."""
-        from oceldb.io.native import write_native
+        """Materialize and transactionally write the native Parquet layout."""
+        from oceldb.io.native.storage import write_native
 
-        write_native(self._dataset, target, overwrite=overwrite)
+        write_native(
+            self._dataset,
+            target,
+            declared=self._directory().to_schema(),
+            overwrite=overwrite,
+        )
 
     def sql(self, query: str) -> pl.DataFrame:
         """Execute DuckDB SQL over the five logical tables.
@@ -224,9 +264,20 @@ class OCEL:
         """
         return execute_sql(
             query,
-            events=self._dataset.frames.events,
-            objects=self._dataset.frames.objects,
-            object_changes=self._dataset.frames.object_changes,
-            e2o=self._dataset.frames.event_object,
-            o2o=self._dataset.frames.object_object,
+            events=self._dataset.tables.events.all(),
+            objects=self._dataset.tables.objects.all(),
+            object_changes=self._dataset.tables.object_changes.all(),
+            e2o=self._dataset.tables.event_object.all(),
+            o2o=self._dataset.tables.object_object.all(),
         )
+
+    def _directory(self) -> TypeDirectory:
+        """Return the attribute directory, probing and caching if unseeded."""
+        if self._presence is None:
+            tables = self._dataset.tables
+            self._presence = TypeDirectory.probe(
+                events=tables.events.all(),
+                objects=tables.objects.all(),
+                object_changes=tables.object_changes.all(),
+            )
+        return self._presence

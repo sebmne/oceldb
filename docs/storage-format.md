@@ -46,6 +46,11 @@ The reserved column names (`ocel_id`, `ocel_time`, `ocel_type`, `ocel_changed_fi
 The manifest is required. A directory containing only similarly named Parquet
 files is not treated as an oceldb dataset.
 
+Opening a native dataset validates the manifest version, required tables,
+canonical type partitions, declared attribute columns, and physical Parquet
+datatypes from file footers. Missing or incompatible storage fails before lazy
+row scans are exposed.
+
 ### `manifest.json`
 
 The manifest is written last and acts as the commit marker for a version 1

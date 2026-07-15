@@ -1,18 +1,19 @@
 """flatten: project an OCEL onto one object type as a classical event log."""
 
+from collections import Counter
 from typing import cast
 
 import polars as pl
 
 from oceldb import schema as s
-from oceldb.utils.step import step
+from oceldb.core.frames import reconstruct_attribute_states
+from oceldb.core.step import step
 from oceldb.ocel import OCEL
 
-_STATE_FIXED = {
+_CHANGE_FIXED = {
     s.OCEL_ID,
     s.OCEL_TIME,
-    s.OCEL_EVENT_ID,
-    s.OCEL_EVENT_TYPE,
+    s.OCEL_CHANGED_FIELD,
     s.OCEL_TYPE,
 }
 _EVENT_FIXED = {s.OCEL_ID, s.OCEL_TIME, s.OCEL_TYPE}
@@ -59,9 +60,8 @@ def flatten(ocel: OCEL, object_type: str) -> pl.LazyFrame:
         summary, so this executes an eager step even though the result is lazy.
 
     Raises:
-        ValueError: If a dynamic object attribute and an event payload attribute
-            share a name, which would be ambiguous in the flattened row. Rename
-            one side before flattening.
+        ValueError: If ``object_type`` is unknown or generated XES, object, and
+            event columns would collide in the flattened output.
 
     Examples:
         >>> from oceldb.transformations import flatten
@@ -69,24 +69,8 @@ def flatten(ocel: OCEL, object_type: str) -> pl.LazyFrame:
         >>> log = ocel >> flatten("Container")
         >>> variants = (ocel >> flatten("order")).group_by("case:concept:name").agg("concept:name")
     """
-    states = ocel.object_states(object_type)
-    object_attrs = [
-        col for col in states.collect_schema().names() if col not in _STATE_FIXED
-    ]
-    static_attrs = _static_attributes(states, object_attrs)
-    dynamic_attrs = [attr for attr in object_attrs if attr not in static_attrs]
-    event_attrs = [
-        col for col in ocel.events().collect_schema().names() if col not in _EVENT_FIXED
-    ]
-
-    clash = sorted(set(dynamic_attrs) & set(event_attrs))
-    if clash:
-        raise ValueError(
-            f"flatten: object and event attributes share names {clash}; "
-            "rename one side before flattening."
-        )
-
-    result = (
+    _require_object_type(ocel, object_type)
+    relations = (
         ocel.event_object()
         .filter(pl.col(s.OCEL_OBJECT_TYPE) == object_type)
         .select(
@@ -95,24 +79,63 @@ def flatten(ocel: OCEL, object_type: str) -> pl.LazyFrame:
             pl.col(s.OCEL_EVENT_TYPE).alias("concept:name"),
         )
         .unique(subset=["case:concept:name", s.OCEL_EVENT_ID])
-        .join(
-            ocel.events().select(
-                pl.col(s.OCEL_ID).alias(s.OCEL_EVENT_ID),
-                pl.col(s.OCEL_TIME).alias("time:timestamp"),
-                *(pl.col(attr) for attr in event_attrs),
-            ),
-            on=s.OCEL_EVENT_ID,
-            how="inner",
-        )
-        .sort("time:timestamp")
     )
+    related_objects = relations.select(
+        pl.col("case:concept:name").alias(s.OCEL_ID)
+    ).unique()
+    changes = ocel.object_changes(object_type).join(
+        related_objects,
+        on=s.OCEL_ID,
+        how="semi",
+    )
+    object_attrs = [
+        col for col in changes.collect_schema().names() if col not in _CHANGE_FIXED
+    ]
+    # Forward-filling repeats existing values, so sparse changes are sufficient
+    # to classify attributes without reconstructing the state history twice.
+    static_attrs = _static_attributes(changes, object_attrs)
+    dynamic_attrs = [attr for attr in object_attrs if attr not in static_attrs]
+    event_attrs = [
+        col for col in ocel.events().collect_schema().names() if col not in _EVENT_FIXED
+    ]
+
+    output_columns = [
+        "case:concept:name",
+        *(f"case:{attr}" for attr in static_attrs),
+        "concept:name",
+        "time:timestamp",
+        *dynamic_attrs,
+        *event_attrs,
+        s.OCEL_EVENT_ID,
+    ]
+    collisions = sorted(
+        name for name, count in Counter(output_columns).items() if count > 1
+    )
+    if collisions:
+        raise ValueError(
+            f"flatten output columns collide: {collisions}. "
+            "Rename the conflicting source attributes before flattening."
+        )
+
+    events = ocel.events()
+    result = relations.join(
+        events.select(
+            pl.col(s.OCEL_ID).alias(s.OCEL_EVENT_ID),
+            pl.col(s.OCEL_TIME).alias("time:timestamp"),
+        ),
+        on=s.OCEL_EVENT_ID,
+        how="inner",
+    ).sort("case:concept:name", "time:timestamp", s.OCEL_EVENT_ID)
 
     if dynamic_attrs:
+        states = reconstruct_attribute_states(changes)
+        # ``changes`` contains one selected type, so the state helper's
+        # type/id/time order is already case/time order for the as-of join.
         state_attrs = states.select(
             pl.col(s.OCEL_ID).alias("case:concept:name"),
             pl.col(s.OCEL_TIME).alias("time:timestamp"),
             *(pl.col(attr) for attr in dynamic_attrs),
-        ).sort("time:timestamp")
+        )
         result = result.join_asof(
             state_attrs,
             on="time:timestamp",
@@ -123,14 +146,31 @@ def flatten(ocel: OCEL, object_type: str) -> pl.LazyFrame:
 
     if static_attrs:
         case_values = (
-            states.group_by(s.OCEL_ID)
+            changes.group_by(s.OCEL_ID)
             .agg(
                 pl.col(attr).drop_nulls().first().alias(f"case:{attr}")
                 for attr in static_attrs
             )
             .rename({s.OCEL_ID: "case:concept:name"})
         )
-        result = result.join(case_values, on="case:concept:name", how="left")
+        result = result.join(
+            case_values,
+            on="case:concept:name",
+            how="left",
+            maintain_order="left",
+        )
+
+    if event_attrs:
+        event_payload = events.select(
+            pl.col(s.OCEL_ID).alias(s.OCEL_EVENT_ID),
+            *(pl.col(attr) for attr in event_attrs),
+        )
+        result = result.join(
+            event_payload,
+            on=s.OCEL_EVENT_ID,
+            how="left",
+            maintain_order="left",
+        )
 
     return result.select(
         "case:concept:name",
@@ -140,10 +180,10 @@ def flatten(ocel: OCEL, object_type: str) -> pl.LazyFrame:
         *dynamic_attrs,
         *event_attrs,
         s.OCEL_EVENT_ID,
-    ).sort("case:concept:name", "time:timestamp", s.OCEL_EVENT_ID)
+    )
 
 
-def _static_attributes(states: pl.LazyFrame, object_attrs: list[str]) -> list[str]:
+def _static_attributes(changes: pl.LazyFrame, object_attrs: list[str]) -> list[str]:
     """Object attributes that never take more than one value for any object.
 
     Such attributes are constant within every case, so they are true case
@@ -152,7 +192,7 @@ def _static_attributes(states: pl.LazyFrame, object_attrs: list[str]) -> list[st
     """
     if not object_attrs:
         return []
-    per_object = states.group_by(s.OCEL_ID).agg(
+    per_object = changes.group_by(s.OCEL_ID).agg(
         pl.col(attr).drop_nulls().n_unique().alias(attr) for attr in object_attrs
     )
     maxima = per_object.select(
@@ -160,3 +200,24 @@ def _static_attributes(states: pl.LazyFrame, object_attrs: list[str]) -> list[st
     ).collect()
     row = maxima.row(0, named=True)
     return [attr for attr in object_attrs if cast(int, row[attr] or 0) <= 1]
+
+
+def _require_object_type(ocel: OCEL, object_type: object) -> None:
+    """Reject malformed or unknown case notions before building a lazy plan."""
+    if not isinstance(object_type, str):
+        raise TypeError("object_type must be a string.")
+    if not object_type:
+        raise ValueError("object_type must not be empty.")
+    if ocel._presence is not None:
+        if object_type not in ocel._presence.object_types:
+            raise ValueError(f"Unknown object type {object_type!r}.")
+        return
+    exists = (
+        ocel.objects()
+        .filter(pl.col(s.OCEL_TYPE) == object_type)
+        .limit(1)
+        .collect()
+        .height
+    )
+    if not exists:
+        raise ValueError(f"Unknown object type {object_type!r}.")

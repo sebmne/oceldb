@@ -1,7 +1,5 @@
 """Convert between oceldb and pm4py OCEL objects."""
 
-from __future__ import annotations
-
 from datetime import date, datetime
 from pathlib import Path
 from tempfile import TemporaryDirectory
@@ -10,20 +8,23 @@ from typing import Any
 import polars as pl
 
 from oceldb import schema as s
-from oceldb.io._schema import materialize
 from oceldb.io._values import format_datetime
 from oceldb.io.exchange._common import (
     EPOCH,
+    E2O_SCHEMA,
+    EVENTS_SCHEMA,
     O2O_SCHEMA,
     OBJECT_CHANGES_SCHEMA,
+    OBJECTS_SCHEMA,
     empty_lf,
+    normalize_core,
     parse_timestamps,
     rows_to_lf,
 )
 from oceldb.io.exchange.json.writer import write_json
+from oceldb.io.errors import io_operation
 from oceldb.ocel import OCEL
 
-__all__ = ["from_pm4py", "to_pm4py"]
 
 # pm4py column name constants
 _EID = "ocel:eid"
@@ -74,16 +75,32 @@ def from_pm4py(pm4py_ocel: Any) -> OCEL:
     """
     try:
         import pandas as pd  # pyright: ignore[reportMissingImports]
-    except ImportError:
-        raise ImportError("pandas is required for pm4py interop: pip install pandas")
+    except ImportError as exc:
+        raise ImportError(
+            "pandas is required for pm4py interop: pip install pandas"
+        ) from exc
+
+    with io_operation("Cannot convert PM4Py OCEL to oceldb"):
+        return _from_pm4py(pm4py_ocel, pd)
+
+
+def _from_pm4py(pm4py_ocel: Any, pd: Any) -> OCEL:
+    """Convert an already dependency-checked PM4Py object."""
 
     # --- events ---
     ev_df = pm4py_ocel.events
-    events = pl.from_pandas(
-        ev_df.rename(
-            columns={_EID: s.OCEL_ID, _ACTIVITY: s.OCEL_TYPE, _TIMESTAMP: s.OCEL_TIME}
-        )
-    ).lazy()
+    events = normalize_core(
+        pl.from_pandas(
+            ev_df.rename(
+                columns={
+                    _EID: s.OCEL_ID,
+                    _ACTIVITY: s.OCEL_TYPE,
+                    _TIMESTAMP: s.OCEL_TIME,
+                }
+            )
+        ).lazy(),
+        EVENTS_SCHEMA,
+    )
 
     # --- objects ---
     obj_df = pm4py_ocel.objects
@@ -91,7 +108,9 @@ def from_pm4py(pm4py_ocel: Any) -> OCEL:
     obj_pl = pl.from_pandas(
         obj_df.rename(columns={_OID: s.OCEL_ID, _OTYPE: s.OCEL_TYPE})
     )
-    objects = obj_pl.select(s.OCEL_ID, s.OCEL_TYPE).lazy()
+    objects = normalize_core(
+        obj_pl.select(s.OCEL_ID, s.OCEL_TYPE).lazy(), OBJECTS_SCHEMA
+    )
 
     oc = _object_changes_from_pm4py(pm4py_ocel, obj_df, static_attr_cols, pd)
 
@@ -125,7 +144,7 @@ def from_pm4py(pm4py_ocel: Any) -> OCEL:
             e2o_frame = e2o_frame.with_columns(
                 pl.lit(None, dtype=pl.String()).alias(column)
             )
-    e2o = e2o_frame.lazy()
+    e2o = normalize_core(e2o_frame.lazy(), E2O_SCHEMA)
 
     # --- O2O ---
     o2o_df = getattr(pm4py_ocel, "o2o", None)
@@ -146,25 +165,16 @@ def from_pm4py(pm4py_ocel: Any) -> OCEL:
                     s.OCEL_QUALIFIER: str(row.get(_QUALIFIER, "")),
                 }
             )
-        o2o = rows_to_lf(o2o_rows) if o2o_rows else empty_lf(O2O_SCHEMA)
+        o2o = rows_to_lf(o2o_rows, O2O_SCHEMA) if o2o_rows else empty_lf(O2O_SCHEMA)
     else:
         o2o = empty_lf(O2O_SCHEMA)
 
-    result = OCEL.from_frames(
-        events=events,
-        objects=objects,
-        object_changes=oc,
-        object_object=o2o,
-        event_object=e2o,
-    )
-    inferred = materialize(result).schema
     return OCEL.from_frames(
         events=events,
         objects=objects,
         object_changes=oc,
         object_object=o2o,
         event_object=e2o,
-        schema=inferred,
     )
 
 
@@ -203,7 +213,10 @@ def _object_changes_from_pm4py(
 
     if not rows:
         return empty_lf(OBJECT_CHANGES_SCHEMA)
-    return parse_timestamps(rows_to_lf(rows), s.OCEL_TIME)
+    return normalize_core(
+        parse_timestamps(rows_to_lf(rows), s.OCEL_TIME),
+        OBJECT_CHANGES_SCHEMA,
+    )
 
 
 def _object_change_rows(row: Any, pd: Any) -> list[dict[str, Any]]:
@@ -286,12 +299,13 @@ def to_pm4py(ocel: OCEL) -> Any:
         import pm4py  # pyright: ignore[reportMissingImports]
     except ImportError as exc:
         raise ImportError("pm4py interop requires: pip install pm4py") from exc
-    with TemporaryDirectory(prefix="oceldb-pm4py-") as directory:
-        path = Path(directory) / "exchange.jsonocel"
-        write_json(ocel, path)
-        reader = getattr(pm4py, "read_ocel2_json", None)
-        if reader is None:
-            reader = getattr(pm4py, "read_ocel", None)
-        if reader is None:
-            raise RuntimeError("Installed pm4py has no OCEL 2.0 JSON reader.")
-        return reader(str(path))
+    with io_operation("Cannot convert oceldb OCEL to PM4Py"):
+        with TemporaryDirectory(prefix="oceldb-pm4py-") as directory:
+            path = Path(directory) / "exchange.jsonocel"
+            write_json(ocel, path)
+            reader = getattr(pm4py, "read_ocel2_json", None)
+            if reader is None:
+                reader = getattr(pm4py, "read_ocel", None)
+            if reader is None:
+                raise RuntimeError("Installed pm4py has no OCEL 2.0 JSON reader.")
+            return reader(str(path))

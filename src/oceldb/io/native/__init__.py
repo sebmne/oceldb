@@ -1,6 +1,3 @@
-"""Native manifested Parquet storage."""
+"""Internal native Parquet storage implementation."""
 
-from oceldb.io.native.manifest import NativeManifestError
-from oceldb.io.native.storage import open_native, write_native
-
-__all__ = ["NativeManifestError", "open_native", "write_native"]
+__all__: list[str] = []

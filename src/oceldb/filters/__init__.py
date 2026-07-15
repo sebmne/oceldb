@@ -6,22 +6,26 @@ Each filter can be called directly (``filter_events_by_type(ocel, ...)``) or as
 a pipe step (``ocel >> filter_events_by_type(...)``).
 """
 
-from oceldb.filters.by_qualifier import (
+from oceldb.filters.events import (
+    filter_events_by_attribute,
+    filter_events_by_id,
+    filter_events_by_object_count,
+    filter_events_by_time,
+    filter_events_by_type,
+    sample_events,
+)
+from oceldb.filters.objects import (
+    filter_objects_by_attribute,
+    filter_objects_by_event_count,
+    filter_objects_by_id,
+    filter_objects_by_o2o_count,
+    filter_objects_by_type,
+    sample_objects,
+)
+from oceldb.filters.relations import (
     filter_e2o_by_qualifier,
     filter_o2o_by_qualifier,
 )
-from oceldb.filters.events.by_attribute import filter_events_by_attribute
-from oceldb.filters.events.by_id import filter_events_by_id
-from oceldb.filters.events.by_object_count import filter_events_by_object_count
-from oceldb.filters.events.by_time import filter_events_by_time
-from oceldb.filters.events.by_type import filter_events_by_type
-from oceldb.filters.events.sample import sample_events
-from oceldb.filters.objects.by_attribute import filter_objects_by_attribute
-from oceldb.filters.objects.by_event_count import filter_objects_by_event_count
-from oceldb.filters.objects.by_id import filter_objects_by_id
-from oceldb.filters.objects.by_o2o_count import filter_objects_by_o2o_count
-from oceldb.filters.objects.by_type import filter_objects_by_type
-from oceldb.filters.objects.sample import sample_objects
 
 __all__ = [
     "filter_e2o_by_qualifier",

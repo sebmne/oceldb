@@ -8,6 +8,7 @@ import polars as pl
 
 from oceldb.io._paths import atomic_file
 from oceldb.io._values import encode_scalar
+from oceldb.io.errors import io_boundary
 
 
 def write_xes(
@@ -43,6 +44,16 @@ def write_xes(
         >>> write_xes(ocel >> flatten("order"), "orders.xes")
         >>> write_xes(ocel >> flatten("order"), "orders.xes", overwrite=True)
     """
+    with io_boundary("write XES to", path):
+        _write_xes(log, path, overwrite=overwrite)
+
+
+def _write_xes(
+    log: pl.LazyFrame | pl.DataFrame,
+    path: str | Path,
+    *,
+    overwrite: bool,
+) -> None:
     df = log.collect() if isinstance(log, pl.LazyFrame) else log
 
     sort_cols = ["case:concept:name", "time:timestamp"]

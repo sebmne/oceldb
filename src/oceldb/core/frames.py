@@ -1,22 +1,8 @@
 """Lazy-frame selection and combination helpers used by :class:`OCEL`."""
 
-from __future__ import annotations
-
-from collections.abc import Sequence
-from typing import cast
-
 import polars as pl
 
 from oceldb import schema as s
-
-
-def select_types(
-    frame: pl.LazyFrame, types: Sequence[str], core: tuple[str, ...]
-) -> pl.LazyFrame:
-    """Filter by OCEL type and omit attributes that are entirely null."""
-    sub = frame.filter(pl.col(s.OCEL_TYPE).is_in(list(types)))
-    kept = present_columns(sub, attribute_columns(frame, core))
-    return sub.select(*core, *kept, s.OCEL_TYPE)
 
 
 def attribute_columns(frame: pl.LazyFrame, core: tuple[str, ...]) -> list[str]:
@@ -26,16 +12,6 @@ def attribute_columns(frame: pl.LazyFrame, core: tuple[str, ...]) -> list[str]:
         for name in frame.collect_schema().names()
         if name not in core and name != s.OCEL_TYPE
     ]
-
-
-def present_columns(frame: pl.LazyFrame, candidates: list[str]) -> list[str]:
-    """Return candidate columns containing at least one non-null value."""
-    if not candidates:
-        return []
-    row = frame.select(
-        pl.col(name).is_not_null().any().alias(name) for name in candidates
-    ).collect()
-    return [name for name in candidates if cast(bool, row.get_column(name).item())]
 
 
 def concat_unique(
@@ -72,6 +48,20 @@ def reconstruct_object_states(
     ).sort(s.OCEL_TYPE, s.OCEL_ID, s.OCEL_TIME)
 
 
+def reconstruct_attribute_states(
+    object_changes: pl.LazyFrame,
+    types: tuple[str, ...] = (),
+) -> pl.LazyFrame:
+    """Forward-fill object attributes without event-causation enrichment."""
+    states, attrs = _forward_filled_states(object_changes, types)
+    return states.select(
+        s.OCEL_ID,
+        s.OCEL_TIME,
+        *attrs,
+        s.OCEL_TYPE,
+    ).sort(s.OCEL_TYPE, s.OCEL_ID, s.OCEL_TIME)
+
+
 def _forward_filled_states(
     object_changes: pl.LazyFrame, types: tuple[str, ...]
 ) -> tuple[pl.LazyFrame, list[str]]:
@@ -80,9 +70,7 @@ def _forward_filled_states(
     candidates = attribute_columns(frame, core)
     if types:
         frame = frame.filter(pl.col(s.OCEL_TYPE).is_in(list(types)))
-        attrs = present_columns(frame, candidates)
-    else:
-        attrs = candidates
+    attrs = candidates
     keys = [s.OCEL_TYPE, s.OCEL_ID, s.OCEL_TIME]
     if not attrs:
         return frame.select(keys).unique(), attrs

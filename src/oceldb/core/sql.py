@@ -1,7 +1,5 @@
 """DuckDB SQL execution over the five logical OCEL frames."""
 
-from __future__ import annotations
-
 import polars as pl
 
 

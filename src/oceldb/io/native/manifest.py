@@ -1,7 +1,5 @@
 """Versioned manifest for native oceldb Parquet datasets."""
 
-from __future__ import annotations
-
 import json
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -9,25 +7,15 @@ from types import MappingProxyType
 from collections.abc import Mapping
 from typing import Any
 
+from oceldb.io.native.layout import NativeStorageError, manifest_layout
 from oceldb.schema import AttributeType, OCELSchema, TypeAttributes
 
 MANIFEST_FILENAME = "manifest.json"
 NATIVE_FORMAT = "oceldb"
 NATIVE_FORMAT_VERSION = 1
 
-_TABLE_LAYOUT = {
-    "events": {"path": "events", "partitionedBy": ["ocel_type"]},
-    "objects": {"path": "objects", "partitionedBy": ["ocel_type"]},
-    "objectChanges": {
-        "path": "object_changes",
-        "partitionedBy": ["ocel_type"],
-    },
-    "eventObject": {"path": "event_object.parquet", "partitionedBy": []},
-    "objectObject": {"path": "object_object.parquet", "partitionedBy": []},
-}
 
-
-class NativeManifestError(ValueError):
+class NativeManifestError(NativeStorageError):
     """A native manifest is malformed or uses an unsupported version."""
 
 
@@ -50,7 +38,7 @@ class NativeManifest:
                 "eventTypes": _types_to_dict(self.schema.event_types),
                 "objectTypes": _types_to_dict(self.schema.object_types),
             },
-            "tables": _TABLE_LAYOUT,
+            "tables": manifest_layout(),
             "metadata": dict(self.metadata),
         }
 
@@ -68,7 +56,7 @@ class NativeManifest:
                 f"Unsupported native format version {version!r}; "
                 f"this library supports version {NATIVE_FORMAT_VERSION}."
             )
-        if value.get("tables") != _TABLE_LAYOUT:
+        if value.get("tables") != manifest_layout():
             raise NativeManifestError(
                 "Native manifest table layout does not match format version 1."
             )
@@ -97,7 +85,7 @@ def read_manifest(path: str | Path) -> NativeManifest:
         raise NativeManifestError(f"Native dataset has no {MANIFEST_FILENAME}: {path}")
     try:
         value = json.loads(file.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError) as exc:
+    except json.JSONDecodeError as exc:
         raise NativeManifestError(f"Cannot read native manifest {file}: {exc}") from exc
     return NativeManifest.from_dict(value)
 
@@ -112,14 +100,12 @@ def write_manifest(
     file = Path(path) / MANIFEST_FILENAME
     document = NativeManifest(schema=schema, metadata=metadata or {}).to_dict()
     try:
-        file.write_text(
-            json.dumps(document, ensure_ascii=False, indent=2) + "\n",
-            encoding="utf-8",
-        )
-    except (OSError, TypeError, ValueError) as exc:
+        contents = json.dumps(document, ensure_ascii=False, indent=2) + "\n"
+    except (TypeError, ValueError) as exc:
         raise NativeManifestError(
             f"Cannot write native manifest {file}: {exc}"
         ) from exc
+    file.write_text(contents, encoding="utf-8")
 
 
 def _types_to_dict(types: Mapping[str, TypeAttributes]) -> dict[str, Any]:

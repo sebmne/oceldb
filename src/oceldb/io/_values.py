@@ -1,7 +1,5 @@
 """Canonical value handling shared by readers and writers."""
 
-from __future__ import annotations
-
 from datetime import date, datetime, time, timezone
 from typing import Any, Literal
 

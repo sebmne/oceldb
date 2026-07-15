@@ -13,22 +13,29 @@ converter (declared SQLite types -> DuckDB types, integers -> ``BIGINT``), and
 the epoch-row trick puts initial object state at ``1970-01-01``.
 """
 
-import shutil
 import sqlite3
 from dataclasses import dataclass
 from pathlib import Path
 from typing import AbstractSet
-from uuid import uuid4
 
 import duckdb
-from oceldb.io.errors import OCELIOError, ValidationMode, check_validation_mode, issue
+from oceldb.io._paths import DirectoryTransaction
+from oceldb.io._schema import validate_dataset_for_io
+from oceldb.io.errors import ValidationMode, check_validation_mode, issue
+from oceldb.io.native.layout import (
+    COMPRESSION,
+    EVENTS,
+    EVENT_OBJECT,
+    OBJECTS,
+    OBJECT_CHANGES,
+    OBJECT_OBJECT,
+)
 from oceldb.io.native.manifest import write_manifest
-from oceldb.io.native.storage import encode_type_name, infer_storage_schema
-from oceldb.schema._layout import CHANGE_CORE, EVENT_CORE
+from oceldb.io.native.storage import infer_storage_schema, staged_dataset
 
 _EPOCH = "TIMESTAMPTZ '1970-01-01 00:00:00+00:00'"
-_EVENT_CORE = set(EVENT_CORE)
-_OBJECT_CHANGE_CORE = set(CHANGE_CORE)
+_EVENT_CORE = set(EVENTS.columns)
+_OBJECT_CHANGE_CORE = set(OBJECT_CHANGES.columns)
 
 _E2O_QUERY = (
     "SELECT eo.ocel_event_id, e.ocel_type AS ocel_event_type, "
@@ -36,7 +43,7 @@ _E2O_QUERY = (
     "FROM src.event_object eo "
     "JOIN src.event  e ON eo.ocel_event_id  = e.ocel_id "
     "JOIN src.object o ON eo.ocel_object_id = o.ocel_id "
-    "ORDER BY eo.ocel_object_id, eo.ocel_event_id"
+    f"ORDER BY {', '.join(EVENT_OBJECT.sort_by)}"
 )
 _O2O_QUERY = (
     "SELECT oo.ocel_source_id, s.ocel_type AS ocel_source_type, "
@@ -44,7 +51,7 @@ _O2O_QUERY = (
     "FROM src.object_object oo "
     "JOIN src.object s ON oo.ocel_source_id = s.ocel_id "
     "JOIN src.object t ON oo.ocel_target_id = t.ocel_id "
-    "ORDER BY oo.ocel_source_id, oo.ocel_target_id"
+    f"ORDER BY {', '.join(OBJECT_OBJECT.sort_by)}"
 )
 
 
@@ -77,22 +84,16 @@ def import_sqlite(
         are cast to DuckDB ``BIGINT`` to avoid 32-bit overflow in large logs.
 
     Examples:
-        >>> from oceldb.io import import_sqlite
-        >>> import_sqlite("running-example.sqlite", "running-example")
+        >>> from oceldb.io import import_ocel
+        >>> import_ocel("running-example.sqlite", "running-example")
     """
     validation = check_validation_mode(validation)
     source = Path(source)
     target = Path(target)
     if not source.exists():
         raise FileNotFoundError(f"Source not found: {source}")
-    if target.exists() and not overwrite:
-        raise FileExistsError(
-            f"Target already exists: {target}. Pass overwrite=True to replace it."
-        )
 
-    staging = target.with_name(f"{target.name}.tmp-{uuid4().hex}")
-    staging.mkdir(parents=True)
-    try:
+    with DirectoryTransaction(target, overwrite=overwrite) as staging:
         con = duckdb.connect()
         try:
             con.execute("INSTALL sqlite; LOAD sqlite")
@@ -103,23 +104,15 @@ def import_sqlite(
             cast_function = "CAST" if validation == "strict" else "TRY_CAST"
             _write_events(con, source, staging, cast_function, validation)
             _write_objects_and_changes(con, source, staging, cast_function, validation)
-            if validation == "strict":
-                _validate_relation_joins(con, source)
-            _copy(con, _E2O_QUERY, staging / "event_object.parquet")
+            _validate_relation_joins(con, source, validation)
+            _copy(con, _E2O_QUERY, EVENT_OBJECT.file(staging))
             if "object_object" in _table_names(source) and _count(con, "object_object"):
-                _copy(con, _O2O_QUERY, staging / "object_object.parquet")
-            write_manifest(staging, schema=infer_storage_schema(staging))
+                _copy(con, _O2O_QUERY, OBJECT_OBJECT.file(staging))
+            schema = infer_storage_schema(staging)
+            validate_dataset_for_io(staged_dataset(staging), validation)
+            write_manifest(staging, schema=schema)
         finally:
             con.close()
-    except BaseException:
-        shutil.rmtree(staging, ignore_errors=True)
-        raise
-
-    if target.is_dir():
-        shutil.rmtree(target)
-    elif target.exists():
-        target.unlink()
-    staging.rename(target)
 
 
 @dataclass(frozen=True)
@@ -135,7 +128,7 @@ def _write_events(
     cast_function: str,
     validation: ValidationMode,
 ) -> None:
-    base = staging / "events"
+    base = EVENTS.root(staging)
     base.mkdir()
     for mapping in _mappings(con, "event_map_type"):
         attrs = _attribute_columns(source, f"event_{mapping.suffix}", _EVENT_CORE)
@@ -151,13 +144,14 @@ def _write_events(
                 for name, sqlite_type in attrs
             ),
         ]
-        out_dir = base / f"ocel_type={encode_type_name(mapping.type_name)}"
-        out_dir.mkdir()
+        output = EVENTS.file(staging, type_name=mapping.type_name)
+        output.parent.mkdir()
         _copy(
             con,
             f"SELECT {', '.join(columns)} "
-            f"FROM src.{_quote('event_' + mapping.suffix)} ORDER BY ocel_time",
-            out_dir / "data.parquet",
+            f"FROM src.{_quote('event_' + mapping.suffix)} "
+            f"ORDER BY {', '.join(EVENTS.sort_by)}",
+            output,
         )
 
 
@@ -168,21 +162,20 @@ def _write_objects_and_changes(
     cast_function: str,
     validation: ValidationMode,
 ) -> None:
-    objects_base = staging / "objects"
+    objects_base = OBJECTS.root(staging)
     objects_base.mkdir()
-    changes_base = staging / "object_changes"
+    changes_base = OBJECT_CHANGES.root(staging)
     changes_base.mkdir()
 
     for mapping in _mappings(con, "object_map_type"):
-        encoded = encode_type_name(mapping.type_name)
-
-        obj_dir = objects_base / f"ocel_type={encoded}"
-        obj_dir.mkdir()
+        object_file = OBJECTS.file(staging, type_name=mapping.type_name)
+        object_file.parent.mkdir()
         _copy(
             con,
             f"SELECT ocel_id FROM src.object "
-            f"WHERE ocel_type = {_sql_string(mapping.type_name)} ORDER BY ocel_id",
-            obj_dir / "data.parquet",
+            f"WHERE ocel_type = {_sql_string(mapping.type_name)} "
+            f"ORDER BY {', '.join(OBJECTS.sort_by)}",
+            object_file,
         )
 
         table = f"object_{mapping.suffix}"
@@ -222,19 +215,21 @@ def _write_objects_and_changes(
         ]
         for name, sqlite_type in attrs:
             _check_cast(con, table, name, _duckdb_type(sqlite_type), validation)
-        ch_dir = changes_base / f"ocel_type={encoded}"
-        ch_dir.mkdir()
+        changes_file = OBJECT_CHANGES.file(staging, type_name=mapping.type_name)
+        changes_file.parent.mkdir()
         _copy(
             con,
             f"SELECT {', '.join(columns)} "
-            f"FROM src.{_quote(table)} ORDER BY ocel_id, ocel_time",
-            ch_dir / "data.parquet",
+            f"FROM src.{_quote(table)} "
+            f"ORDER BY {', '.join(OBJECT_CHANGES.sort_by)}",
+            changes_file,
         )
 
 
 def _copy(con: duckdb.DuckDBPyConnection, query: str, path: Path) -> None:
     con.execute(
-        f"COPY ({query}) TO {_sql_string(str(path))} (FORMAT PARQUET, COMPRESSION ZSTD)"
+        f"COPY ({query}) TO {_sql_string(str(path))} "
+        f"(FORMAT PARQUET, COMPRESSION {COMPRESSION.upper()})"
     )
 
 
@@ -250,19 +245,27 @@ def _count(con: duckdb.DuckDBPyConnection, table: str) -> int:
     return int(row[0]) if row else 0
 
 
-def _validate_relation_joins(con: duckdb.DuckDBPyConnection, source: Path) -> None:
+def _validate_relation_joins(
+    con: duckdb.DuckDBPyConnection,
+    source: Path,
+    validation: ValidationMode,
+) -> None:
+    if validation == "none":
+        return
     e2o_rows = _count(con, "event_object")
     joined_e2o = _query_count(con, _E2O_QUERY)
     if joined_e2o != e2o_rows:
-        raise OCELIOError(
-            f"SQLite event_object contains {e2o_rows - joined_e2o} dangling relation(s)."
+        issue(
+            validation,
+            f"SQLite event_object contains {e2o_rows - joined_e2o} dangling relation(s).",
         )
     if "object_object" in _table_names(source):
         o2o_rows = _count(con, "object_object")
         joined_o2o = _query_count(con, _O2O_QUERY)
         if joined_o2o != o2o_rows:
-            raise OCELIOError(
-                f"SQLite object_object contains {o2o_rows - joined_o2o} dangling relation(s)."
+            issue(
+                validation,
+                f"SQLite object_object contains {o2o_rows - joined_o2o} dangling relation(s).",
             )
 
 

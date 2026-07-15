@@ -1,13 +1,10 @@
-"""View filter: restrict an OCEL to selected event and object types."""
+"""Compose event-type and object-type filters into an OCEL view."""
 
 from collections.abc import Iterable
 
-import polars as pl
-
-from oceldb import schema as s
-from oceldb.utils import to_list
-from oceldb.utils.step import step
-from oceldb.core.pruning import sublog_from_relations
+from oceldb.filters import filter_events_by_type, filter_objects_by_type
+from oceldb.filters._utils import normalize_scope
+from oceldb.core.step import step
 from oceldb.ocel import OCEL
 
 
@@ -18,14 +15,11 @@ def view(
     event_types: str | Iterable[str] | None = None,
     object_types: str | Iterable[str] | None = None,
 ) -> OCEL:
-    """Create an object-centric view (sub-log) of *ocel* by selecting types.
+    """Create a view by composing the canonical type filters.
 
-    Restricts the log to the chosen event and object types and removes
-    everything left unconnected: an event is kept only if it shares an
-    event-to-object relation with a kept object, and an object is kept only if
-    it shares one with a kept event. Events, objects, object changes and the
-    E2O / O2O relations are all pruned to the survivors. This is the standard
-    OCEL "view" / sublog construction.
+    Event types are filtered first, followed by object types. Omitting either
+    scope skips that filter; omitting both returns the source log unchanged.
+    This keeps view semantics identical to the corresponding public filters.
 
     Args:
         ocel: The log to take a view of. Omit to get a pipe step instead.
@@ -33,7 +27,7 @@ def view(
         object_types: Object types to keep. ``None`` keeps every object type.
 
     Returns:
-        A new ``OCEL`` holding the connected core of the selection.
+        The ``OCEL`` produced by applying the requested type filters.
 
     Examples:
         >>> from oceldb.transformations import view
@@ -41,13 +35,13 @@ def view(
         >>> paid = view(ocel, event_types=["Pay Order"], object_types=["order"])
         >>> result = ocel >> view(object_types="order") >> view(event_types="Pay Order")
     """
-    relations = ocel.event_object()
+    result = ocel
     if event_types is not None:
-        relations = relations.filter(
-            pl.col(s.OCEL_EVENT_TYPE).is_in(to_list(event_types))
-        )
+        scope = normalize_scope(event_types)
+        assert scope is not None
+        result = filter_events_by_type(result, *scope)
     if object_types is not None:
-        relations = relations.filter(
-            pl.col(s.OCEL_OBJECT_TYPE).is_in(to_list(object_types))
-        )
-    return sublog_from_relations(ocel, relations)
+        scope = normalize_scope(object_types)
+        assert scope is not None
+        result = filter_objects_by_type(result, *scope)
+    return result

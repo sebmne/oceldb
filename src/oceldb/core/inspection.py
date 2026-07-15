@@ -1,11 +1,10 @@
 """Materialized summaries and notebook representations for OCEL logs."""
 
-from __future__ import annotations
-
 import html
-from collections.abc import Iterable, Sequence
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from datetime import datetime
+from types import MappingProxyType
 from typing import cast
 
 import polars as pl
@@ -24,21 +23,20 @@ class OCELSummary:
     object_changes: int
     e2o: int
     o2o: int
-    event_types: dict[str, int]
-    object_types: dict[str, int]
+    event_types: Mapping[str, int]
+    object_types: Mapping[str, int]
     start_time: datetime | None
     end_time: datetime | None
 
-
-@dataclass(frozen=True)
-class _Overview:
-    events: int
-    objects: int
-    object_changes: int
-    e2o: int
-    o2o: int
-    event_types: list[str]
-    object_types: list[str]
+    def __post_init__(self) -> None:
+        object.__setattr__(
+            self, "event_types", MappingProxyType(dict(self.event_types))
+        )
+        object.__setattr__(
+            self,
+            "object_types",
+            MappingProxyType(dict(self.object_types)),
+        )
 
 
 def describe_frames(
@@ -49,127 +47,138 @@ def describe_frames(
     o2o: pl.LazyFrame,
 ) -> OCELSummary:
     """Compute the programmatic summary for five logical OCEL frames."""
+    time_dtype = events.collect_schema()[s.OCEL_TIME]
+    data = pl.concat(
+        [
+            _typed_statistics(
+                events,
+                "events",
+                time_dtype=time_dtype,
+                include_time=True,
+            ),
+            _typed_statistics(
+                objects,
+                "objects",
+                time_dtype=time_dtype,
+                include_time=False,
+            ),
+            _row_count(object_changes, "object_changes", time_dtype=time_dtype),
+            _row_count(e2o, "e2o", time_dtype=time_dtype),
+            _row_count(o2o, "o2o", time_dtype=time_dtype),
+        ],
+        how="vertical",
+    ).collect()
+    event_data = data.filter(pl.col("_table") == "events")
+    object_data = data.filter(pl.col("_table") == "objects")
     return OCELSummary(
-        events=_count(events),
-        objects=_count(objects),
-        object_changes=_count(object_changes),
-        e2o=_count(e2o),
-        o2o=_count(o2o),
-        event_types=_type_counts(events),
-        object_types=_type_counts(objects),
-        start_time=_time_bound(events, descending=False),
-        end_time=_time_bound(events, descending=True),
+        events=_sum_counts(event_data),
+        objects=_sum_counts(object_data),
+        object_changes=_named_count(data, "object_changes"),
+        e2o=_named_count(data, "e2o"),
+        o2o=_named_count(data, "o2o"),
+        event_types=_counts_by_type(event_data),
+        object_types=_counts_by_type(object_data),
+        start_time=cast("datetime | None", event_data.get_column("_start").min()),
+        end_time=cast("datetime | None", event_data.get_column("_end").max()),
     )
 
 
-def text_repr(
-    events: pl.LazyFrame,
-    objects: pl.LazyFrame,
-    object_changes: pl.LazyFrame,
-    e2o: pl.LazyFrame,
-    o2o: pl.LazyFrame,
-) -> str:
+def text_repr(summary: OCELSummary) -> str:
     """Render the compact plain-text OCEL overview."""
-    overview = _overview(events, objects, object_changes, e2o, o2o)
     return (
         "OCEL\n"
-        f"  events:         {_rows(overview.events)} | "
-        f"{_types(overview.event_types)}\n"
-        f"  objects:        {_rows(overview.objects)} | "
-        f"{_types(overview.object_types)}\n"
-        f"  object changes: {_rows(overview.object_changes)}\n"
-        f"  relations:      E2O: {_rows(overview.e2o)} | "
-        f"O2O: {_rows(overview.o2o)}"
+        f"  events:         {_rows(summary.events)} | "
+        f"{_types(list(summary.event_types))}\n"
+        f"  objects:        {_rows(summary.objects)} | "
+        f"{_types(list(summary.object_types))}\n"
+        f"  object changes: {_rows(summary.object_changes)}\n"
+        f"  relations:      E2O: {_rows(summary.e2o)} | "
+        f"O2O: {_rows(summary.o2o)}"
     )
 
 
-def html_repr(
-    events: pl.LazyFrame,
-    objects: pl.LazyFrame,
-    object_changes: pl.LazyFrame,
-    e2o: pl.LazyFrame,
-    o2o: pl.LazyFrame,
-) -> str:
+def html_repr(summary: OCELSummary) -> str:
     """Render the notebook HTML OCEL overview."""
-    overview = _overview(events, objects, object_changes, e2o, o2o)
     counts = "".join(
         f"<tr><th style='text-align:left'>{label}</th>"
         f"<td style='text-align:right'>{value:,}</td></tr>"
         for label, value in (
-            ("Events", overview.events),
-            ("Objects", overview.objects),
-            ("Object changes", overview.object_changes),
-            ("E2O relations", overview.e2o),
-            ("O2O relations", overview.o2o),
+            ("Events", summary.events),
+            ("Objects", summary.objects),
+            ("Object changes", summary.object_changes),
+            ("E2O relations", summary.e2o),
+            ("O2O relations", summary.o2o),
         )
     )
     return (
         "<div style='font-family:sans-serif'>"
         "<strong>OCEL</strong>"
         f"<table>{counts}</table>"
-        f"<div><em>Event types:</em> {_chips(overview.event_types)}</div>"
-        f"<div><em>Object types:</em> {_chips(overview.object_types)}</div>"
+        f"<div><em>Event types:</em> {_chips(list(summary.event_types))}</div>"
+        f"<div><em>Object types:</em> {_chips(list(summary.object_types))}</div>"
         "</div>"
     )
 
 
-def _overview(
-    events: pl.LazyFrame,
-    objects: pl.LazyFrame,
-    object_changes: pl.LazyFrame,
-    e2o: pl.LazyFrame,
-    o2o: pl.LazyFrame,
-) -> _Overview:
-    return _Overview(
-        events=_count(events),
-        objects=_count(objects),
-        object_changes=_count(object_changes),
-        e2o=_count(e2o),
-        o2o=_count(o2o),
-        event_types=_distinct_types(events),
-        object_types=_distinct_types(objects),
+def _typed_statistics(
+    frame: pl.LazyFrame,
+    table: str,
+    *,
+    time_dtype: pl.DataType,
+    include_time: bool,
+) -> pl.LazyFrame:
+    start = (
+        pl.col(s.OCEL_TIME).min() if include_time else pl.lit(None, dtype=time_dtype)
     )
-
-
-def _count(frame: pl.LazyFrame) -> int:
-    return int(cast(int, frame.select(pl.len()).collect().item()))
-
-
-def _distinct_types(frame: pl.LazyFrame) -> list[str]:
-    values: Iterable[object] = (
-        frame.select(s.OCEL_TYPE)
-        .unique()
-        .collect()
-        .get_column(s.OCEL_TYPE)
-        .drop_nulls()
-        .sort()
-        .to_list()
-    )
-    return [str(value) for value in values]
-
-
-def _type_counts(frame: pl.LazyFrame) -> dict[str, int]:
-    data = (
-        frame.select(s.OCEL_TYPE)
-        .drop_nulls()
-        .group_by(s.OCEL_TYPE)
-        .len()
-        .sort(s.OCEL_TYPE)
-        .collect()
-    )
-    return {
-        str(name): int(cast(int, count))
-        for name, count in zip(
-            data.get_column(s.OCEL_TYPE).to_list(), data.get_column("len").to_list()
+    end = pl.col(s.OCEL_TIME).max() if include_time else pl.lit(None, dtype=time_dtype)
+    return (
+        frame.group_by(s.OCEL_TYPE)
+        .agg(
+            pl.len().alias("_count"),
+            start.alias("_start"),
+            end.alias("_end"),
         )
+        .select(
+            pl.lit(table).alias("_table"),
+            s.OCEL_TYPE,
+            "_count",
+            "_start",
+            "_end",
+        )
+    )
+
+
+def _row_count(
+    frame: pl.LazyFrame,
+    table: str,
+    *,
+    time_dtype: pl.DataType,
+) -> pl.LazyFrame:
+    return frame.select(
+        pl.lit(table).alias("_table"),
+        pl.lit(None, dtype=pl.String).alias(s.OCEL_TYPE),
+        pl.len().alias("_count"),
+        pl.lit(None, dtype=time_dtype).alias("_start"),
+        pl.lit(None, dtype=time_dtype).alias("_end"),
+    )
+
+
+def _sum_counts(data: pl.DataFrame) -> int:
+    return int(cast(int, data.get_column("_count").sum() or 0))
+
+
+def _named_count(data: pl.DataFrame, table: str) -> int:
+    value = data.filter(pl.col("_table") == table).get_column("_count").item()
+    return int(cast(int, value))
+
+
+def _counts_by_type(data: pl.DataFrame) -> dict[str, int]:
+    counts = {
+        str(name): int(cast(int, count))
+        for name, count in data.select(s.OCEL_TYPE, "_count").iter_rows()
+        if name is not None
     }
-
-
-def _time_bound(frame: pl.LazyFrame, *, descending: bool) -> datetime | None:
-    column = pl.col(s.OCEL_TIME)
-    aggregation = column.max() if descending else column.min()
-    value = frame.select(aggregation.alias("bound")).collect().item()
-    return cast("datetime | None", value)
+    return dict(sorted(counts.items()))
 
 
 def _rows(count: int) -> str:

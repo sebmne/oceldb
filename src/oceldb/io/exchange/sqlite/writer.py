@@ -29,7 +29,7 @@ def write_sqlite(
     master tables, ``event_map_type`` / ``object_map_type`` type-to-suffix
     mappings, per-type ``event_<suffix>`` / ``object_<suffix>`` attribute
     tables, and ``event_object`` / ``object_object`` relation tables. The
-    output can be imported with :func:`~oceldb.io.import_sqlite` or read by any
+    output can be imported with :func:`~oceldb.io.import_ocel` or read by any
     other OCEL 2.0-compatible tool such as pm4py.
 
     Args:
@@ -42,9 +42,9 @@ def write_sqlite(
         FileExistsError: If ``path`` exists and ``overwrite`` is ``False``.
 
     Examples:
-        >>> from oceldb.io import write_sqlite
-        >>> write_sqlite(ocel, "output.sqlite")
-        >>> write_sqlite(ocel >> view(object_types="order"), "orders.sqlite", overwrite=True)
+        >>> from oceldb.io import export_ocel
+        >>> export_ocel(ocel, "output.sqlite")
+        >>> export_ocel(orders, "orders.sqlite", overwrite=True)
     """
     validation = check_validation_mode(validation)
     data = materialize(ocel)

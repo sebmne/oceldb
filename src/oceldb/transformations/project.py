@@ -3,7 +3,7 @@
 import polars as pl
 
 from oceldb import schema as s
-from oceldb.utils.step import step
+from oceldb.core.step import step
 from oceldb.core.pruning import sublog_from_event_ids
 from oceldb.ocel import OCEL
 
@@ -27,16 +27,44 @@ def project(ocel: OCEL, *object_ids: str) -> OCEL:
         those events, and whose E2O / O2O relations, object changes, and
         attribute columns are pruned to that connected core.
 
+    Raises:
+        ValueError: If no object id is supplied or an id is unknown.
+
     Examples:
         >>> from oceldb.transformations import project
         >>> sub = project(ocel, "order-42")
         >>> sub = project(ocel, "order-42", "order-99")
         >>> result = ocel >> view(object_types=["order"]) >> project("order-42")
     """
+    selected = _validate_object_ids(ocel, object_ids)
     kept_events = (
         ocel.event_object()
-        .filter(pl.col(s.OCEL_OBJECT_ID).is_in(list(object_ids)))
+        .filter(pl.col(s.OCEL_OBJECT_ID).is_in(selected))
         .select(s.OCEL_EVENT_ID)
         .unique()
     )
     return sublog_from_event_ids(ocel, kept_events)
+
+
+def _validate_object_ids(ocel: OCEL, values: tuple[object, ...]) -> list[str]:
+    if not values:
+        raise ValueError("project requires at least one object id.")
+    selected: list[str] = []
+    for value in values:
+        if not isinstance(value, str):
+            raise TypeError("object ids must be strings.")
+        if not value:
+            raise ValueError("object ids must not be empty.")
+        if value not in selected:
+            selected.append(value)
+    known = set(
+        ocel.objects()
+        .filter(pl.col(s.OCEL_ID).is_in(selected))
+        .select(s.OCEL_ID)
+        .collect()
+        .get_column(s.OCEL_ID)
+        .to_list()
+    )
+    if missing := sorted(set(selected) - known):
+        raise ValueError(f"Unknown object ids: {missing}.")
+    return selected

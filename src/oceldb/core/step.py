@@ -1,4 +1,4 @@
-"""Decorator that makes filter functions usable both directly and as pipe steps."""
+"""Decorator for functions that also support OCEL pipeline syntax."""
 
 from __future__ import annotations
 
@@ -38,15 +38,7 @@ class StepFunction(Protocol[_P, _R_co]):
 def step(
     fn: Callable[Concatenate[OCEL, _P], _R],
 ) -> StepFunction[_P, _R]:
-    """Wrap *fn* so it can be called with or without an OCEL as the first arg.
-
-    When called with an ``OCEL`` as the first positional argument the function
-    runs immediately. When called without one it returns a partial that can be
-    applied through the ``ocel >> step`` pipe operator (``OCEL.__rshift__``).
-
-    The returned protocol preserves both call styles without requiring local
-    overload declarations on every decorated function.
-    """
+    """Allow *fn* to run directly or produce an ``OCEL.__rshift__`` step."""
 
     @functools.wraps(fn)
     def wrapper(*args: Any, **kwargs: Any) -> "_R | Callable[[OCEL], _R]":
@@ -55,9 +47,9 @@ def step(
         if args and isinstance(args[0], OCEL):
             return fn(*args, **kwargs)  # pyright: ignore[reportCallIssue]
 
-        def step(ocel: "OCEL") -> _R:
+        def apply(ocel: "OCEL") -> _R:
             return fn(ocel, *args, **kwargs)  # pyright: ignore[reportCallIssue]
 
-        return step
+        return apply
 
     return cast("StepFunction[_P, _R]", wrapper)

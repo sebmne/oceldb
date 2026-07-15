@@ -1,5 +1,3 @@
-"""Derived, potentially lossy exports."""
+"""Internal lossy export implementations."""
 
-from oceldb.io.exports.xes import write_xes
-
-__all__ = ["write_xes"]
+__all__: list[str] = []

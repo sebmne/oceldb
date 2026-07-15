@@ -1,5 +1,3 @@
-"""Third-party OCEL integrations."""
+"""Internal third-party integration implementations."""
 
-from oceldb.io.integrations.pm4py import from_pm4py, to_pm4py
-
-__all__ = ["from_pm4py", "to_pm4py"]
+__all__: list[str] = []

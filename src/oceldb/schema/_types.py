@@ -1,17 +1,16 @@
-"""Declared OCEL type and attribute metadata.
+"""Declared OCEL type and attribute metadata for IO boundaries.
 
 OCEL 2.0 exchange formats carry schemas independently from their event and
-object instances.  Keeping that information on :class:`oceldb.OCEL` is what
-makes lossless cross-format conversion possible, including for unused types and
-attributes whose values are always null.
+object instances. Readers parse these declarations and seed the attribute
+directory on :class:`oceldb.OCEL`; the native manifest stores them at rest.
+That keeps lossless cross-format conversion possible, including for unused
+types and attributes whose values are always null.
 """
-
-from __future__ import annotations
 
 from dataclasses import dataclass, field
 from enum import Enum
 from types import MappingProxyType
-from collections.abc import Iterable, Mapping
+from collections.abc import Mapping
 
 import polars as pl
 
@@ -105,7 +104,12 @@ def _freeze_types(
 
 @dataclass(frozen=True)
 class OCELSchema:
-    """Declared event and object types, including their attribute schemas."""
+    """Declared event and object types, including their attribute schemas.
+
+    This is an IO-boundary record: exchange readers parse it, the native
+    manifest stores it, and writers derive it from the data. It is never
+    carried through transformations.
+    """
 
     event_types: Mapping[str, TypeAttributes] = field(default_factory=dict)
     object_types: Mapping[str, TypeAttributes] = field(default_factory=dict)
@@ -113,60 +117,3 @@ class OCELSchema:
     def __post_init__(self) -> None:
         object.__setattr__(self, "event_types", _freeze_types(self.event_types))
         object.__setattr__(self, "object_types", _freeze_types(self.object_types))
-
-    @classmethod
-    def empty(cls) -> "OCELSchema":
-        return cls()
-
-    def rename(
-        self,
-        *,
-        events: Mapping[str, str] | None = None,
-        objects: Mapping[str, str] | None = None,
-    ) -> "OCELSchema":
-        """Return a schema with type names remapped consistently."""
-        return OCELSchema(
-            event_types=_rename_types(self.event_types, events),
-            object_types=_rename_types(self.object_types, objects),
-        )
-
-    @classmethod
-    def merge(cls, *schemas: "OCELSchema") -> "OCELSchema":
-        """Union schemas, widening conflicting declarations to strings."""
-        return cls(
-            event_types=_merge_types(schema.event_types for schema in schemas),
-            object_types=_merge_types(schema.object_types for schema in schemas),
-        )
-
-
-def _rename_types(
-    types: Mapping[str, TypeAttributes], mapping: Mapping[str, str] | None
-) -> dict[str, dict[str, AttributeType]]:
-    renamed: dict[str, dict[str, AttributeType]] = {}
-    for old_name, attributes in types.items():
-        name = mapping.get(old_name, old_name) if mapping else old_name
-        current = renamed.setdefault(name, {})
-        for attribute, attr_type in attributes.items():
-            previous = current.get(attribute)
-            current[attribute] = _widen(previous, attr_type)
-    return renamed
-
-
-def _merge_types(
-    groups: Iterable[Mapping[str, TypeAttributes]],
-) -> dict[str, dict[str, AttributeType]]:
-    merged: dict[str, dict[str, AttributeType]] = {}
-    for types in groups:
-        for type_name, attributes in types.items():
-            current = merged.setdefault(type_name, {})
-            for attribute, attr_type in attributes.items():
-                current[attribute] = _widen(current.get(attribute), attr_type)
-    return merged
-
-
-def _widen(previous: AttributeType | None, current: AttributeType) -> AttributeType:
-    if previous is None or previous == current:
-        return current
-    if {previous, current} <= {AttributeType.INTEGER, AttributeType.FLOAT}:
-        return AttributeType.FLOAT
-    return AttributeType.STRING

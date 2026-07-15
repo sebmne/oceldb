@@ -213,6 +213,9 @@ cython_debug/
 # PyPI configuration file
 .pypirc
 
+# Local benchmark datasets
+/benchmarks/*.sqlite
+
 # Marimo
 marimo/_static/
 marimo/_lsp/

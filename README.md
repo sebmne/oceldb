@@ -10,8 +10,8 @@ imported explicitly into that native layout.
 
 Core table accessors return `polars.LazyFrame`; execution normally begins when
 you call `collect()`, `sink_parquet()`, or another Polars execution method.
-Type-specific event/change accessors perform a small eager presence query to
-remove attribute columns that are null for every selected row.
+Type-specific native accessors scan and union only the requested Parquet
+partitions; they do not inspect unrelated types or eagerly query row values.
 
 ## Installation
 
@@ -23,13 +23,34 @@ uv add oceldb
 
 Requires Python 3.11+.
 
+Reproducible native-storage and transformation measurements are available in
+the [performance benchmarks](docs/benchmarks.md).
+
+## Public API
+
+The supported import surface is intentionally small:
+
+- `oceldb`: `OCEL`, `OCELSchema`, `OCELSummary`, `AttributeType`, and the
+  base/validation exceptions.
+- `oceldb.io`: high-level import/export functions, one-off readers,
+  integrations, IO exceptions, and the `ExchangeFormat` / `ValidationMode`
+  type aliases.
+- `oceldb.filters`: the documented event, object, and relation filters.
+- `oceldb.transformations`: `flatten`, `project`, `rename_types`, and `view`.
+- `oceldb.schema`: OCEL column constants and schema type aliases.
+
+Modules below `oceldb.core` and implementation packages below `oceldb.io` are
+internal. They may change with the storage implementation and should not be
+imported by applications.
+
 ## Quick Start
 
 ```python
-from oceldb.io import import_sqlite, open_ocel
+from oceldb import OCEL
+from oceldb.io import import_ocel
 
-import_sqlite("running-example.sqlite", "running-example")
-ocel = open_ocel("running-example")
+import_ocel("running-example.sqlite", "running-example")
+ocel = OCEL.open("running-example")
 
 event_counts = (
     ocel.events()
@@ -51,20 +72,22 @@ latest_order_states = (
 
 ## Opening and Importing Logs
 
-Use `open_ocel(...)` for an existing native dataset. Opening is lazy: it reads
-the small manifest and constructs Parquet scans without loading row data.
+Use `OCEL.open(...)` for an existing native dataset. Opening validates the
+manifest, partition directories, and Parquet schemas before constructing lazy
+scans; row data is not loaded.
 
 ```python
-from oceldb.io import open_ocel
+from oceldb import OCEL
 
-ocel = open_ocel("native-log")
+ocel = OCEL.open("native-log")
 ```
 
 Use `import_ocel(...)` to convert an OCEL 2.0 exchange file into reusable
 native storage. The returned log is opened lazily from the new native dataset.
 Under the default strict validation, JSON and XML records are parsed
 incrementally into typed Parquet batches; SQLite is converted directly through
-DuckDB. Permissive `warn` and `none` imports currently use the eager fallback.
+DuckDB. The `strict`, `warn`, and `none` modes all use the same streaming import
+path.
 
 ```python
 from oceldb.io import import_ocel
@@ -78,21 +101,14 @@ Exchange readers validate declarations, values, timestamps, relationships, and
 identifiers by default. Use `validation="warn"` to recover usable data while
 emitting warnings, or `validation="none"` for trusted inputs.
 
-`OCEL.open(...)` is the class-level equivalent of `open_ocel(...)`:
-
-```python
-from oceldb import OCEL
-
-ocel = OCEL.open("converted-log")
-```
-
 SQLite is import-only because it cannot produce Polars lazy frames directly.
 Import it into native storage, then open that dataset:
 
 ```python
-from oceldb.io import import_sqlite
+from oceldb import OCEL
+from oceldb.io import import_ocel
 
-import_sqlite("source.sqlite", "converted-log", overwrite=True)
+import_ocel("source.sqlite", "converted-log", overwrite=True)
 ocel = OCEL.open("converted-log")
 ```
 
@@ -109,8 +125,8 @@ import pm4py
 ocel = from_pm4py(pm4py.read_ocel2_xml("log.xmlocel"))  # OCEL 2.0 only
 ```
 
-These parse the whole file into memory. For larger logs, use `import_ocel()` or
-the format-specific importers to produce file-backed native frames.
+These parse the whole file into memory. For larger logs, use `import_ocel()` to
+produce file-backed native frames.
 
 ## The OCEL API
 
@@ -128,12 +144,55 @@ ocel.object_states("order")   # forward-filled object state history
 
 ocel.event_object()           # event-to-object relations
 ocel.object_object()          # object-to-object relations
+
+ocel.validate()               # check logical columns, IDs, types, and references
 ```
 
+Native writes and JSON, XML, and SQLite import/export run the same logical
+validation automatically. Native opening separately validates the manifest and
+physical Parquet layout without scanning row data.
+
+## Errors
+
+All exceptions raised by oceldb itself share one base class. Validation and IO
+failures can be handled independently, while native storage errors expose more
+specific subclasses:
+
+```python
+from oceldb import OCELDBError, OCELValidationError
+from oceldb.io import OCELIOError, NativeManifestError, NativeStorageError
+
+try:
+    ocel = OCEL.open("native-log")
+except FileNotFoundError:
+    # The path itself does not exist.
+    ...
+except NativeManifestError:
+    # The native manifest is missing, malformed, or unsupported.
+    ...
+except NativeStorageError:
+    # Another native Parquet layout or storage failure occurred.
+    ...
+except OCELValidationError:
+    # The logical OCEL tables violate the canonical data contract.
+    ...
+except OCELIOError:
+    # Another import, export, parser, or conversion failure occurred.
+    ...
+except OCELDBError:
+    # Any other error reported by oceldb itself.
+    ...
+```
+
+Standard filesystem exceptions such as `FileNotFoundError` and
+`FileExistsError`, and `ImportError` for missing optional integrations, retain
+their standard types. Wrapped parser and engine exceptions are available as the
+exception's `__cause__`.
+
 When you pass type names to `events(...)`, `object_changes(...)`, or
-`object_states(...)`, oceldb filters the rows and omits attribute columns that
-are entirely null for the selected types. This keeps type-specific queries
-smaller and easier to inspect.
+`object_states(...)`, native logs read only those types' Parquet files and
+expose the attributes declared for those types. In-memory and transformed logs
+use a lazy filter with the same schema-driven column selection.
 
 ## Filtering and Pipelines
 
@@ -166,6 +225,10 @@ Two keyword arguments are consistent across the predicate filters:
   every type.
 - **`mode`** — `"include"` (default) keeps the matching rows; `"exclude"` keeps
   the complement (within the scope).
+
+A nullable predicate result is treated as no match. Include mode therefore
+drops null results, while exclude mode retains them. Invalid modes and bounds
+raise immediately instead of failing later during Polars execution.
 
 ```python
 # Drop only the "pay order" events after a cutoff; every other event is kept
@@ -203,6 +266,11 @@ multi_object_events = ocel >> filter_events_by_object_count(
 first_quarter = ocel >> filter_events_by_time(start="2024-01-01", end="2024-03-31")
 ```
 
+Time bounds accept ISO 8601 strings, `date`, or `datetime` values. Naive values
+are interpreted as UTC and offset-aware values are converted to UTC. Count
+filters count distinct related objects or events, include zero-count rows, and
+require at least one non-negative bound.
+
 Object filters:
 
 ```python
@@ -238,6 +306,11 @@ bundled_orders = ocel >> filter_objects_by_o2o_count(
 `"always"` for every recorded state, or a timestamp string for the last known
 state at or before that time.
 
+Objects explicitly selected by an object filter remain in the result even when
+they have no event relation. Under `when="always"`, an object without recorded
+states matches vacuously; it does not match `"sometimes"` or a point-in-time
+query.
+
 Relation and sampling filters:
 
 ```python
@@ -262,8 +335,7 @@ tenth = ocel >> sample_objects(fraction=0.1, seed=0)
 `oceldb.transformations` derives new tables or sub-logs from an `OCEL`. Like
 filters, each can be called directly or as a `>>` pipe step.
 
-`view` and `project` return a new `OCEL` (a sub-log with the connected core
-pruned):
+`view` and `project` return a new `OCEL` sub-log:
 
 ```python
 from oceldb.transformations import view, project
@@ -275,13 +347,41 @@ orders_view = ocel >> view(object_types=["order", "item"], event_types=["Pay Ord
 around_order = ocel >> project("order-42")
 ```
 
+`view(...)` is a convenience composition of `filter_events_by_type(...)`
+followed by `filter_objects_by_type(...)`. An omitted type scope is skipped;
+calling `view()` without either scope is an identity operation.
+
+Sub-logs remain lazy. If the same filtered result will feed several independent
+queries, materialize it once after composing the complete pipeline:
+
+```python
+orders_view = (
+    ocel
+    >> view(object_types=["order", "item"], event_types=["Pay Order"])
+).materialize()
+
+orders_view.events().collect()
+orders_view.describe()
+```
+
+`materialize()` returns another `OCEL` with the same accessors, backed by
+in-memory frames. It should be placed at the reuse boundary rather than between
+filters, so a pipeline stays lazy and executes only its final plans once.
+
+Every row-filtering operation, including explicit type filters and `view`, keeps
+the source declarations while the sub-log remains lazy. `materialize()` is the
+single schema-resolution boundary: it reduces both sides of the schema to the
+types actually present because the rows have already been collected. Type
+renaming still renames declarations immediately, since it changes schema names
+rather than deciding which rows survive.
+
 `flatten` projects the log onto one object type as a classical XES-style event
 log (a `LazyFrame`) — the standard input for control-flow discovery:
 
 ```python
-from oceldb.transformations import flatten, collect
+from oceldb.transformations import flatten
 
-log = ocel >> flatten("order") >> collect()
+log = (ocel >> flatten("order")).collect()
 ```
 
 Its columns are:
@@ -296,38 +396,24 @@ Its columns are:
 - `<attribute>` — one per event payload attribute.
 - `ocel_event_id`.
 
-An object attribute and an event attribute sharing a name would be ambiguous in
-a flattened row, so `flatten` raises `ValueError` in that case — rename one side
-first (e.g. with `rename_types`, below).
-
-`case_table` summarizes each object as a single row — lifecycle span, event
-count, first/last activity, and last-known attribute values — a feature table
-for machine learning and decision mining:
-
-```python
-from oceldb.transformations import case_table
-
-features = ocel >> case_table(object_types="order") >> collect()
-```
-
-`collect()` is a terminal pipe step that materializes the preceding lazy frame,
-so an entire pipeline reads as one expression.
+Output-column collisions would make a flattened row ambiguous, so `flatten`
+raises `ValueError` before constructing the result. Rename conflicting source
+attributes before flattening.
 
 ## Log Operations
 
 Beyond filtering, oceldb ships the operations you almost always need after
 importing or before exporting a log.
 
-Check and repair referential integrity (readers and manual construction do not
-guarantee it):
+Check logical columns, datatypes, identities, declared types, and relationship
+references explicitly when working with manually constructed logs:
 
 ```python
-from oceldb.validation import validate, clean
-
-report = validate(ocel)
-if not report.is_valid:
-    ocel = ocel >> clean()  # drop dangling relations, dedupe ids, sort events
+ocel.validate()
 ```
+
+Persistence boundaries validate automatically. Invalid data is reported rather
+than silently repaired; transformations remain immutable and explicit.
 
 Relabel type names consistently across every table:
 
@@ -351,6 +437,10 @@ summary = ocel.describe()               # counts, per-type counts, time span
 summary.events, summary.event_types, summary.start_time, summary.end_time
 ```
 
+The first summary executes one combined aggregation plan over the lazy tables.
+Its immutable result is cached on that `OCEL` and is also reused by notebook
+representations.
+
 ## Exporting
 
 Use `export_ocel(...)` when the operation is specifically native-to-exchange.
@@ -365,25 +455,30 @@ export_ocel("native-log", "out.sqlite")
 ```
 
 JSON, XML, and SQLite exports retain declared types, attribute schemas, object
-changes, E2O/O2O qualifiers, and time-valued attributes. The format-specific
-writers remain available:
+changes, E2O/O2O qualifiers, and time-valued attributes. Native storage and the
+lossy XES projection remain explicit:
 
 ```python
-from oceldb.io import write_json, write_sqlite, write_xes, write_xml
+from oceldb.io import export_ocel, write_xes
 from oceldb.transformations import flatten
 
-ocel.write("my-log", overwrite=True)                # native Parquet directory
-write_json(ocel, "out.jsonocel", overwrite=True)    # OCEL 2.0 JSON
-write_xml(ocel, "out.xmlocel", overwrite=True)      # OCEL 2.0 XML
-write_sqlite(ocel, "out.sqlite", overwrite=True)    # OCEL 2.0 SQLite
-write_xes(ocel >> flatten("order"), "orders.xes")   # a flattened log to XES
+ocel.write("my-log", overwrite=True)                       # native Parquet
+export_ocel(ocel, "out.jsonocel", overwrite=True)          # OCEL 2.0 JSON
+export_ocel(ocel, "out.xmlocel", overwrite=True)           # OCEL 2.0 XML
+export_ocel(ocel, "out.sqlite", overwrite=True)             # OCEL 2.0 SQLite
+write_xes(ocel >> flatten("order"), "orders.xes")          # flattened XES
 ```
 
+Native writes are transactional. Tables originating from an unchanged native
+dataset are copied directly into staging; transformed tables are
+schema-normalized and streamed into new type partitions. The staged Parquet
+layout is reopened and validated before its manifest is written and the
+directory is atomically committed.
+
 `write_xes` takes the output of `flatten`; `case:*` columns become trace
-attributes and the remaining columns become event attributes. Codec
-capabilities are inspectable through `exchange_codecs()`; `XES_CAPABILITIES`
-explicitly records that XES requires a case notion and is not a lossless OCEL
-encoding.
+attributes and the remaining columns become event attributes. XES requires a
+case notion and is therefore intentionally separate from the lossless OCEL 2.0
+exchange API.
 
 OCEL 2.0 formats declare event and object attribute types independently from
 their instances. Exchange readers preserve this information as `ocel.schema`.
@@ -397,7 +492,7 @@ You can build an `OCEL` from explicitly named Polars lazy frames with
 dangling relations or sort rows.
 
 ```python
-from datetime import datetime
+from datetime import datetime, timezone
 
 import polars as pl
 from oceldb import OCEL
@@ -405,7 +500,7 @@ from oceldb import OCEL
 events = pl.DataFrame(
     {
         "ocel_id": ["e1"],
-        "ocel_time": [datetime(2024, 1, 1)],
+        "ocel_time": [datetime(2024, 1, 1, tzinfo=timezone.utc)],
         "ocel_type": ["Place Order"],
         "amount": [42.0],
     }
@@ -418,8 +513,8 @@ objects = pl.DataFrame(
 object_changes = pl.DataFrame(
     {
         "ocel_id": ["o1"],
-        "ocel_time": [datetime(1970, 1, 1)],
-        "ocel_changed_field": [None],
+        "ocel_time": [datetime(1970, 1, 1, tzinfo=timezone.utc)],
+        "ocel_changed_field": pl.Series([None], dtype=pl.String),
         "status": ["created"],
         "ocel_type": ["order"],
     }
@@ -431,7 +526,7 @@ e2o = pl.DataFrame(
         "ocel_event_type": ["Place Order"],
         "ocel_object_id": ["o1"],
         "ocel_object_type": ["order"],
-        "ocel_qualifier": [None],
+        "ocel_qualifier": ["order"],
     }
 ).lazy()
 
@@ -452,6 +547,7 @@ ocel = OCEL.from_frames(
     event_object=e2o,
     object_object=o2o,
 )
+ocel.validate()
 ocel.write("manual-log", overwrite=True)
 ```
 
@@ -486,22 +582,19 @@ and exports. Supporting code is grouped by responsibility:
 src/oceldb/
   ocel.py
   schema/          # column constants and declared OCEL type metadata
-  core/            # frame, state, inspection, SQL, and pruning services
+  core/            # tables, validation, inspection, SQL, and pipeline machinery
   io/
     native/        # manifested Parquet storage and batch writing
     exchange/      # lossless codec operations supported by each format
     integrations/  # optional third-party bridges such as PM4Py
     exports/       # derived/lossy formats such as XES
-  validation/      # integrity reports and repairs
   filters/
   transformations/
-  utils/
 ```
 
 ```bash
 uv run ruff check .
 uv run basedpyright
-uv run pytest
 ```
 
 MIT
