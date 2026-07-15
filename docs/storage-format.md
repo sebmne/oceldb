@@ -39,7 +39,7 @@ my-log/
 
 `events`, `objects` and `object_changes` are **Hive-partitioned by type**: one subdirectory per type, named `ocel_type=<url-encoded name>`, each containing a single `data.parquet`. The two relation tables are flat single files.
 
-Type names are **URL-encoded** in directory names (`Place Order` → `Place%20Order`). This keeps paths unambiguous across operating systems and shells without inventing a bespoke escaping scheme; the canonical name (with spaces, slashes, unicode, …) is always recoverable by URL-decoding. **Note for direct readers:** when you read with `hive_partitioning`, the injected `ocel_type` value is the *encoded* string — URL-decode it to get the canonical type name. (oceldb's own reader decodes it for you.)
+Type names are **URL-encoded** in directory names (`Place Order` → `Place%20Order`). This keeps paths unambiguous across operating systems and shells without inventing a bespoke escaping scheme; the canonical name (with spaces, slashes, unicode, …) is always recoverable by URL-decoding. This percent-encoding is the standard Hive convention, so engines that implement it (Polars among them) inject the *decoded* canonical name as the `ocel_type` value when reading with `hive_partitioning`; if your reader surfaces the raw directory string instead, URL-decode it yourself.
 
 The reserved column names (`ocel_id`, `ocel_time`, `ocel_type`, `ocel_changed_field`, the relation columns, …) are the stable contract and are defined as constants in `oceldb.schema`.
 
@@ -132,7 +132,8 @@ The object-to-object (O2O) relation: `ocel_source_id`, `ocel_source_type`, `ocel
 ## Conventions
 
 - **Compression:** all files use **ZSTD** — a middle ground between Snappy (weaker ratio) and GZIP (slower). Combined with Parquet's automatic dictionary encoding for low-cardinality strings, no manual tuning is needed.
-- **Per-type files carry only that type's declared attributes,** so different types' files have different column sets. A reader unions them **by name** — an attribute absent from a type's file is simply `NULL` for those rows. When an `OCELSchema` is available, empty and all-null declared attributes are retained as typed columns; manually constructed logs without metadata infer their schema from observed values.
+- **Per-type files carry only that type's declared attributes,** so different types' files have different column sets. A reader unions them **by name** — an attribute absent from a type's file is simply `NULL` for those rows. oceldb itself opens each partitioned table as **one hive scan** whose union column schema comes from the manifest, so declared-but-empty types and all-null attributes stay typed, and type predicates are pruned to the matching partition files by the query optimizer.
+- **One dtype per shared attribute column.** Because the partitions of a table union into one logical frame, an attribute name reused by several event types (or several object types) must carry the same physical dtype in every partition. Writers enforce this by widening conflicting declarations — `integer`/`float` conflicts become `float`, anything else becomes `string`. Opening a dataset that violates this invariant fails with an explicit error.
 - **Timestamps** are stored as microsecond Parquet timestamps; ids, types and qualifiers as strings; numeric attributes as `int64`/`double`, booleans as `bool`.
 
 ---

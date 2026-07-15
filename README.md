@@ -10,8 +10,9 @@ imported explicitly into that native layout.
 
 Core table accessors return `polars.LazyFrame`; execution normally begins when
 you call `collect()`, `sink_parquet()`, or another Polars execution method.
-Type-specific native accessors scan and union only the requested Parquet
-partitions; they do not inspect unrelated types or eagerly query row values.
+Native datasets are opened as hive scans, so type predicates are pruned to the
+matching Parquet partition files by the query optimizer — including through
+later filters and joins.
 
 ## Installation
 
@@ -30,14 +31,13 @@ the [performance benchmarks](docs/benchmarks.md).
 
 The supported import surface is intentionally small:
 
-- `oceldb`: `OCEL`, `OCELSchema`, `OCELSummary`, `AttributeType`, and the
-  base/validation exceptions.
+- `oceldb`: `OCEL`, `OCELSummary`, and the base/validation exceptions.
 - `oceldb.io`: high-level import/export functions, one-off readers,
   integrations, IO exceptions, and the `ExchangeFormat` / `ValidationMode`
   type aliases.
 - `oceldb.filters`: the documented event, object, and relation filters.
 - `oceldb.transformations`: `flatten`, `project`, `rename_types`, and `view`.
-- `oceldb.schema`: OCEL column constants and schema type aliases.
+- `oceldb.schema`: OCEL column constants.
 
 Modules below `oceldb.core` and implementation packages below `oceldb.io` are
 internal. They may change with the storage implementation and should not be
@@ -190,9 +190,12 @@ their standard types. Wrapped parser and engine exceptions are available as the
 exception's `__cause__`.
 
 When you pass type names to `events(...)`, `object_changes(...)`, or
-`object_states(...)`, native logs read only those types' Parquet files and
-expose the attributes declared for those types. In-memory and transformed logs
-use a lazy filter with the same schema-driven column selection.
+`object_states(...)`, the result carries **only the attribute columns those
+types actually have**, and native logs read only those types' Parquet files.
+For a log opened or read at an IO boundary that means the declared attributes
+(fully lazy, from the manifest or exchange declarations); for a transformed
+log it means the observed non-null attributes, probed once from the data and
+cached on the `OCEL`.
 
 ## Filtering and Pipelines
 
@@ -368,12 +371,10 @@ orders_view.describe()
 in-memory frames. It should be placed at the reuse boundary rather than between
 filters, so a pipeline stays lazy and executes only its final plans once.
 
-Every row-filtering operation, including explicit type filters and `view`, keeps
-the source declarations while the sub-log remains lazy. `materialize()` is the
-single schema-resolution boundary: it reduces both sides of the schema to the
-types actually present because the rows have already been collected. Type
-renaming still renames declarations immediately, since it changes schema names
-rather than deciding which rows survive.
+Transformations never maintain schema metadata. A transformed log answers
+"which types and attributes exist?" by observing its own data, so filtered-out
+types simply disappear and renamed types are found under their new names —
+there is nothing to keep in sync.
 
 `flatten` projects the log onto one object type as a classical XES-style event
 log (a `LazyFrame`) — the standard input for control-flow discovery:
@@ -469,11 +470,11 @@ export_ocel(ocel, "out.sqlite", overwrite=True)             # OCEL 2.0 SQLite
 write_xes(ocel >> flatten("order"), "orders.xes")          # flattened XES
 ```
 
-Native writes are transactional. Tables originating from an unchanged native
-dataset are copied directly into staging; transformed tables are
-schema-normalized and streamed into new type partitions. The staged Parquet
-layout is reopened and validated before its manifest is written and the
-directory is atomically committed.
+Native writes are transactional. An unmodified opened dataset is copied
+file-by-file without executing any query plans; a transformed log is
+normalized and streamed into new type partitions. The staged Parquet layout
+is reopened and validated before its manifest is written and the directory is
+atomically committed.
 
 `write_xes` takes the output of `flatten`; `case:*` columns become trace
 attributes and the remaining columns become event attributes. XES requires a
@@ -481,9 +482,11 @@ case notion and is therefore intentionally separate from the lossless OCEL 2.0
 exchange API.
 
 OCEL 2.0 formats declare event and object attribute types independently from
-their instances. Exchange readers preserve this information as `ocel.schema`.
-Manually constructed logs can provide an `OCELSchema`; when it is omitted,
-writers infer declarations from observed Polars columns.
+their instances. Logs opened from native storage or read from an exchange file
+carry those declarations internally, so exporting an unmodified log is
+lossless — including declared-but-empty types and all-null attributes. For
+manually constructed or transformed logs, writers infer the declarations from
+the observed Polars columns and dtypes.
 
 ## Manual Construction
 
@@ -581,8 +584,8 @@ and exports. Supporting code is grouped by responsibility:
 ```text
 src/oceldb/
   ocel.py
-  schema/          # column constants and declared OCEL type metadata
-  core/            # tables, validation, inspection, SQL, and pipeline machinery
+  schema/          # column constants and IO-boundary type declarations
+  core/            # presence, validation, inspection, SQL, and pipeline machinery
   io/
     native/        # manifested Parquet storage and batch writing
     exchange/      # lossless codec operations supported by each format
