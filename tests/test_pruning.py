@@ -1,7 +1,7 @@
 """Hive partition pruning of native datasets through the query optimizer."""
 
 from oceldb import OCEL
-from oceldb.filters import filter_events_by_type
+from oceldb.operations.filters import filter_events_by_type
 
 
 def _events_partitions(plan: str) -> list[str]:
@@ -28,7 +28,7 @@ def test_pruning_survives_chained_filter(native_ocel: OCEL) -> None:
 
 def test_url_encoded_type_names_roundtrip(tmp_path) -> None:
     from conftest import build_ocel
-    from oceldb.transformations import rename_types
+    from oceldb.operations.transformations import rename_types
 
     renamed = rename_types(
         build_ocel(),

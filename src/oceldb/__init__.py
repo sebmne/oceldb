@@ -1,12 +1,10 @@
-"""Polars-backed access to OCEL 2.0 logs."""
+"""Polars-backed access to OCEL 2.0 event logs.
 
-from oceldb.errors import OCELDBError, OCELValidationError
-from oceldb.core.inspection import OCELSummary
+The public surface is the ``OCEL`` class itself, ``oceldb.operations`` for
+filters and transformations, and ``oceldb.core.schema`` for the reserved
+column-name constants.
+"""
+
 from oceldb.ocel import OCEL
 
-__all__ = [
-    "OCEL",
-    "OCELDBError",
-    "OCELSummary",
-    "OCELValidationError",
-]
+__all__ = ["OCEL"]

@@ -41,12 +41,13 @@ def build_ocel() -> OCEL:
             "ocel_id": ["c1", "c1", "o1"],
             "ocel_time": pl.Series([_ts(1), _ts(2), _ts(1)], dtype=UTC_DT),
             "ocel_type": ["Container", "Container", "Order"],
-            "ocel_changed_field": ["status", "status", "total"],
+            "ocel_changed_field": pl.Series([None, "status", None], dtype=pl.String),
+            "ocel_is_initial": [True, False, True],
             "status": ["packed", "shipped", None],
             "total": pl.Series([None, None, 30], dtype=pl.Int64),
         }
     )
-    event_object = pl.LazyFrame(
+    e2o = pl.LazyFrame(
         {
             "ocel_event_id": ["e1", "e2", "e3", "e4"],
             "ocel_event_type": ["Load", "Load", "Pay", "Pay"],
@@ -55,7 +56,7 @@ def build_ocel() -> OCEL:
             "ocel_qualifier": ["loads", "loads", "pays", "pays"],
         }
     )
-    object_object = pl.LazyFrame(
+    o2o = pl.LazyFrame(
         {
             "ocel_source_id": ["c1"],
             "ocel_source_type": ["Container"],
@@ -64,12 +65,12 @@ def build_ocel() -> OCEL:
             "ocel_qualifier": ["belongs to"],
         }
     )
-    return OCEL.from_frames(
+    return OCEL(
         events=events,
         objects=objects,
         object_changes=object_changes,
-        event_object=event_object,
-        object_object=object_object,
+        e2o=e2o,
+        o2o=o2o,
     )
 
 
@@ -102,9 +103,5 @@ def assert_same_log(left: OCEL, right: OCEL) -> None:
     assert collect_sorted(left.object_changes()).equals(
         collect_sorted(right.object_changes())
     )
-    assert collect_sorted(left.event_object()).equals(
-        collect_sorted(right.event_object())
-    )
-    assert collect_sorted(left.object_object()).equals(
-        collect_sorted(right.object_object())
-    )
+    assert collect_sorted(left.e2o()).equals(collect_sorted(right.e2o()))
+    assert collect_sorted(left.o2o()).equals(collect_sorted(right.o2o()))

@@ -5,12 +5,13 @@ import pytest
 
 from conftest import assert_same_log, build_ocel
 from oceldb import OCEL, OCELValidationError
-from oceldb.filters import (
+from oceldb.operations.filters import (
     filter_events_by_type,
     filter_objects_by_type,
     filter_objects_by_event_count,
 )
-from oceldb.transformations import flatten, project, rename_types, view
+from oceldb.operations.transformations import rename_types
+from oceldb.transformations import flatten, project, view
 
 
 def test_filter_events_prunes_connected_core(ocel: OCEL) -> None:

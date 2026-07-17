@@ -24,7 +24,7 @@ import duckdb
 import polars as pl
 
 from oceldb import OCEL
-from oceldb.filters import (
+from oceldb.operations.filters import (
     filter_events_by_time,
     filter_events_by_type,
     filter_objects_by_event_count,

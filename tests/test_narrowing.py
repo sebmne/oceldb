@@ -1,7 +1,7 @@
 """Typed accessors return only the selected types' attribute columns."""
 
 from oceldb import OCEL
-from oceldb.filters import filter_events_by_type
+from oceldb.operations.filters import filter_events_by_type
 
 
 def test_probe_narrows_events(ocel: OCEL) -> None:

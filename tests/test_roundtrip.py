@@ -75,7 +75,7 @@ def test_declared_but_empty_types_survive(tmp_path) -> None:
 
 
 def test_transformed_export_infers_from_data(ocel: OCEL, tmp_path) -> None:
-    from oceldb.filters import filter_events_by_type
+    from oceldb.operations.filters import filter_events_by_type
 
     sub = filter_events_by_type(ocel, "Load")
     path = tmp_path / "sub.json"
