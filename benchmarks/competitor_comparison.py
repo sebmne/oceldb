@@ -570,7 +570,12 @@ def _summarize_samples(samples: list[JSON]) -> JSON:
     }
     if not completed:
         return result
-    for key in ("import_seconds", "setup_seconds", "operation_seconds", "total_seconds"):
+    for key in (
+        "import_seconds",
+        "setup_seconds",
+        "operation_seconds",
+        "total_seconds",
+    ):
         values = [float(sample[key]) for sample in completed]
         result[f"median_{key}"] = statistics.median(values)
         result[f"min_{key}"] = min(values)
@@ -764,9 +769,13 @@ def _polars_signature(
                 pl.col(time_column).max().alias("time_max"),
             )
         )
-    row = lazy.select(*expressions).collect(engine="streaming").row(
-        0,
-        named=True,
+    row = (
+        lazy.select(*expressions)
+        .collect(engine="streaming")
+        .row(
+            0,
+            named=True,
+        )
     )
     return _normalize_signature(row, len(columns), time_column is not None)
 
@@ -922,8 +931,7 @@ def _amortization(measurements: list[JSON]) -> JSON | None:
         saving = float(exchange_access) - float(native_access)
         result[competitor] = {
             "formula": (
-                "oceldb_ingest / "
-                f"({competitor}_repeated_load - oceldb_repeated_load)"
+                f"oceldb_ingest / ({competitor}_repeated_load - oceldb_repeated_load)"
             ),
             "repeated_access_saving_seconds": saving,
             "break_even_repeated_accesses": (
@@ -1016,7 +1024,9 @@ def _print_report(report: JSON) -> None:
         ]
         if lines:
             print()
-            print("Native conversion break-even (repeated accesses): " + ", ".join(lines))
+            print(
+                "Native conversion break-even (repeated accesses): " + ", ".join(lines)
+            )
 
 
 def parser() -> argparse.ArgumentParser:
@@ -1078,9 +1088,7 @@ def main() -> None:
     if not source.is_file():
         raise FileNotFoundError(f"OCEL exchange source does not exist: {source}")
     missing = [
-        package
-        for package in ("pm4py", "r4pm")
-        if _package_version(package) is None
+        package for package in ("pm4py", "r4pm") if _package_version(package) is None
     ]
     if missing:
         raise RuntimeError(
