@@ -11,7 +11,6 @@ import polars as pl
 
 from oceldb.core import schema as s
 from oceldb.ocel import OCEL
-from oceldb.operations._utils import replace
 
 
 def prune_log(
@@ -41,8 +40,7 @@ def prune_log(
     """
     kept_ids = objects.select(s.OCEL_ID).unique()
     kept_object_ids = kept_ids.rename({s.OCEL_ID: s.OCEL_OBJECT_ID})
-    return replace(
-        ocel,
+    return ocel._derive(
         events=events,
         objects=objects,
         object_changes=ocel.object_changes().join(kept_ids, on=s.OCEL_ID, how="semi"),

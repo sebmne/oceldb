@@ -1,5 +1,7 @@
 """Run a SQL query over an OCEL's five tables via an ephemeral DuckDB connection."""
 
+from importlib.util import find_spec
+
 import polars as pl
 
 
@@ -25,7 +27,16 @@ def execute_sql(
 
     Returns:
         The query result as an eager ``polars.DataFrame``.
+
+    Raises:
+        ModuleNotFoundError: If the optional ``sql`` dependencies are not
+            installed.
     """
+    if find_spec("duckdb") is None or find_spec("pyarrow") is None:
+        raise ModuleNotFoundError(
+            "OCEL.sql() requires the optional SQL dependencies. Install them "
+            "with `pip install 'oceldb[sql]'`."
+        )
     import duckdb
 
     connection = duckdb.connect()

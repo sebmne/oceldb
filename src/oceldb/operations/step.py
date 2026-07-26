@@ -23,7 +23,7 @@ class StepFunction(Protocol[_P, _R_co]):
     """A function callable directly or curried into an OCEL pipeline step."""
 
     @overload
-    def __call__(self, ocel: OCEL, /, *args: _P.args, **kwargs: _P.kwargs) -> _R_co: ...
+    def __call__(self, ocel: OCEL, *args: _P.args, **kwargs: _P.kwargs) -> _R_co: ...
 
     @overload
     def __call__(
@@ -39,7 +39,14 @@ def step(
     @functools.wraps(fn)
     def wrapper(*args: Any, **kwargs: Any) -> "_R | Callable[[OCEL], _R]":
         if args and isinstance(args[0], OCEL):
+            if "ocel" in kwargs:
+                raise TypeError(f"{fn.__name__}() got multiple values for 'ocel'")
             return fn(*args, **kwargs)  # pyright: ignore[reportCallIssue]
+        if "ocel" in kwargs:
+            source = kwargs.pop("ocel")
+            if not isinstance(source, OCEL):
+                raise TypeError("ocel must be an OCEL.")
+            return fn(source, *args, **kwargs)  # pyright: ignore[reportCallIssue]
 
         def apply(ocel: "OCEL") -> _R:
             return fn(ocel, *args, **kwargs)  # pyright: ignore[reportCallIssue]

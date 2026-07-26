@@ -4,9 +4,13 @@ import polars as pl
 
 from oceldb.core import schema as s
 from oceldb.ocel import OCEL
-from oceldb.operations.filters._utils import Mode, match_decision
-from oceldb.operations.pruning import sublog_from_relations
+from oceldb.operations.filters._utils import (
+    Mode,
+    _filter_events_direct,
+    match_decision,
+)
 from oceldb.operations.step import step
+from oceldb.types import normalize_strings
 
 
 @step
@@ -32,9 +36,12 @@ def filter_events_by_type(
         >>> sub = filter_events_by_type(ocel, "Place Order")
         >>> sub = ocel >> filter_events_by_type("Place Order", mode="exclude")
     """
-    keep = match_decision(pl.col(s.OCEL_EVENT_TYPE).is_in(list(types)), mode)
-    events = ocel.events().filter(
-        match_decision(pl.col(s.OCEL_TYPE).is_in(list(types)), mode)
+    selected = normalize_strings(types, name="types", non_empty=True)
+    return _filter_events_direct(
+        ocel,
+        event_predicate=match_decision(pl.col(s.OCEL_TYPE).is_in(selected), mode),
+        relation_predicate=match_decision(
+            pl.col(s.OCEL_EVENT_TYPE).is_in(selected),
+            mode,
+        ),
     )
-    relations = ocel.e2o().filter(keep)
-    return sublog_from_relations(ocel, relations, events=events)

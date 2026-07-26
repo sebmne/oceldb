@@ -1,4 +1,4 @@
-"""filter_objects_by_o2o_count: keep or remove objects by O2O relation count."""
+"""Filter objects by their number of distinct O2O neighbors."""
 
 from typing import Literal
 
@@ -8,13 +8,12 @@ from oceldb.core import schema as s
 from oceldb.ocel import OCEL
 from oceldb.operations.filters._utils import (
     Mode,
-    TypeScope,
-    normalize_scope,
     scoped_match,
     within_bounds,
 )
 from oceldb.operations.pruning import sublog_from_object_ids
 from oceldb.operations.step import step
+from oceldb.types import OneOrMany, normalize_strings
 
 Direction = Literal["in", "out", "both"]
 
@@ -23,28 +22,30 @@ Direction = Literal["in", "out", "both"]
 def filter_objects_by_o2o_count(
     ocel: OCEL,
     *,
+    object_types: OneOrMany[str] | None = None,
+    related_types: OneOrMany[str] | None = None,
+    direction: Direction = "both",
     min_count: int | None = None,
     max_count: int | None = None,
-    related_types: TypeScope = None,
-    direction: Direction = "both",
-    object_types: TypeScope = None,
     mode: Mode = "include",
 ) -> OCEL:
-    """Keep or remove objects by their incoming, outgoing, or total O2O count.
+    """Keep or remove objects by their number of distinct O2O neighbors.
 
     Args:
         ocel: The source log. Omit to get a pipe step instead.
-        min_count: Inclusive lower bound on the O2O relation count. Omit for
-            no lower bound.
-        max_count: Inclusive upper bound on the O2O relation count. Omit for
-            no upper bound.
-        related_types: Only relations to/from these object types count.
-            ``None`` counts every object type.
-        direction: ``"out"`` counts relations where the object is the
-            source, ``"in"`` where it is the target, ``"both"`` sums both.
         object_types: Limits which object types the count applies to;
             objects of other types are left untouched. ``None`` applies it
             to every type.
+        related_types: Only relations to/from these object types count.
+            ``None`` counts every object type.
+        direction: ``"out"`` counts relations where the object is the
+            source, ``"in"`` where it is the target, and ``"both"`` counts
+            neighbors in either direction. Parallel relations and self-loops
+            count each related object once.
+        min_count: Inclusive lower bound on distinct related objects. Omit
+            for no lower bound.
+        max_count: Inclusive upper bound on distinct related objects. Omit
+            for no upper bound.
         mode: ``"include"`` keeps objects within bounds; ``"exclude"``
             removes them.
 
@@ -64,50 +65,45 @@ def filter_objects_by_o2o_count(
     if direction not in {"in", "out", "both"}:
         raise ValueError("direction must be 'in', 'out', or 'both'.")
     in_bounds = within_bounds(min_count=min_count, max_count=max_count)
-    related_scope = normalize_scope(related_types)
+    related_scope = normalize_strings(
+        related_types,
+        name="related_types",
+        non_empty=True,
+    )
     o2o = ocel.o2o()
 
-    out_relations = o2o
-    in_relations = o2o
-    if related_scope is not None:
-        out_relations = out_relations.filter(
-            pl.col(s.OCEL_TARGET_TYPE).is_in(related_scope)
-        )
-        in_relations = in_relations.filter(
-            pl.col(s.OCEL_SOURCE_TYPE).is_in(related_scope)
-        )
-    out_counts = (
-        out_relations.group_by(s.OCEL_SOURCE_ID)
-        .agg(pl.len().alias("_count"))
-        .rename({s.OCEL_SOURCE_ID: s.OCEL_ID})
+    outgoing = o2o.select(
+        pl.col(s.OCEL_SOURCE_ID).alias(s.OCEL_ID),
+        pl.col(s.OCEL_TARGET_ID).alias("_related_id"),
+        pl.col(s.OCEL_TARGET_TYPE).alias("_related_type"),
     )
-    in_counts = (
-        in_relations.group_by(s.OCEL_TARGET_ID)
-        .agg(pl.len().alias("_count"))
-        .rename({s.OCEL_TARGET_ID: s.OCEL_ID})
+    incoming = o2o.select(
+        pl.col(s.OCEL_TARGET_ID).alias(s.OCEL_ID),
+        pl.col(s.OCEL_SOURCE_ID).alias("_related_id"),
+        pl.col(s.OCEL_SOURCE_TYPE).alias("_related_type"),
     )
-
     if direction == "both":
-        combined = (
-            pl.concat([out_counts, in_counts])
-            .group_by(s.OCEL_ID)
-            .agg(pl.col("_count").sum())
-        )
+        adjacency = pl.concat([outgoing, incoming])
     elif direction == "out":
-        combined = out_counts
+        adjacency = outgoing
     else:
-        combined = in_counts
+        adjacency = incoming
+    if related_scope is not None:
+        adjacency = adjacency.filter(pl.col("_related_type").is_in(related_scope))
+    counts = adjacency.group_by(s.OCEL_ID).agg(
+        pl.col("_related_id").n_unique().alias("_count")
+    )
 
     object_counts = (
         ocel.objects()
         .select(s.OCEL_ID, s.OCEL_TYPE)
-        .join(combined, on=s.OCEL_ID, how="left")
+        .join(counts, on=s.OCEL_ID, how="left")
         .with_columns(pl.col("_count").fill_null(0))
     )
     keep = scoped_match(
         in_bounds,
         type_col=s.OCEL_TYPE,
-        scope=normalize_scope(object_types),
+        scope=normalize_strings(object_types, name="object_types", non_empty=True),
         mode=mode,
     )
     return sublog_from_object_ids(

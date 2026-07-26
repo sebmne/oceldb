@@ -8,15 +8,13 @@ from oceldb.core import schema as s
 from oceldb.ocel import OCEL
 from oceldb.operations.filters._utils import (
     Mode,
-    TimeBound,
-    TypeScope,
-    normalize_scope,
     normalize_time_bound,
     validate_mode,
+    validate_predicate,
 )
 from oceldb.operations.pruning import sublog_from_object_ids
-from oceldb.operations.states import reconstruct_attribute_states
 from oceldb.operations.step import step
+from oceldb.types import OneOrMany, TimeLike, normalize_strings
 
 
 @step
@@ -24,15 +22,14 @@ def filter_objects_by_attribute(
     ocel: OCEL,
     predicate: pl.Expr,
     *,
-    object_types: TypeScope = None,
-    when: Literal["sometimes", "always"] | TimeBound = "sometimes",
+    object_types: OneOrMany[str] | None = None,
+    when: Literal["any", "all"] | TimeLike = "any",
     mode: Mode = "include",
 ) -> OCEL:
     """Keep or remove objects whose state history satisfies a predicate.
 
-    The predicate is evaluated against each object's forward-filled
-    attribute state, one row per recorded change — see
-    :func:`oceldb.operations.states.reconstruct_attribute_states`.
+    The predicate is evaluated against :meth:`OCEL.object_states`, with one
+    forward-filled state row per recorded change timestamp.
 
     Args:
         ocel: The source log. Omit to get a pipe step instead.
@@ -41,12 +38,10 @@ def filter_objects_by_attribute(
         object_types: Limits which object types the predicate applies to;
             objects of other types are left untouched. ``None`` applies it
             to every type.
-        when: ``"sometimes"`` matches an object if any recorded state
-            matches; ``"always"`` matches if every recorded state matches
-            (vacuously true for an object with no state history); an
-            ISO/date/datetime value matches against the state as of that
-            instant (not vacuously true for an object with no matching
-            state).
+        when: ``"any"`` matches an object if any recorded state matches;
+            ``"all"`` matches if every recorded state matches (vacuously
+            true for an object with no state history); an ISO/date/datetime
+            value evaluates the state as of that instant.
         mode: ``"include"`` keeps matching objects; ``"exclude"`` removes
             them.
 
@@ -63,20 +58,18 @@ def filter_objects_by_attribute(
         ... )
     """
     validate_mode(mode)
-    scope = normalize_scope(object_types)
-    states = reconstruct_attribute_states(
-        ocel.object_changes(*(scope or ())), tuple(scope or ())
-    )
+    scope = normalize_strings(object_types, name="object_types", non_empty=True)
+    states = ocel.object_states(*(scope or ()))
     scoped_objects = (
         ocel.objects()
         if scope is None
         else ocel.objects().filter(pl.col(s.OCEL_TYPE).is_in(scope))
     )
-    resolved = predicate.fill_null(False)
+    resolved = validate_predicate(predicate).fill_null(False)
 
-    if when == "sometimes":
+    if when == "any":
         matching = states.filter(resolved).select(s.OCEL_ID).unique()
-    elif when == "always":
+    elif when == "all":
         failing = states.filter(~resolved).select(s.OCEL_ID).unique()
         matching = scoped_objects.select(s.OCEL_ID).join(
             failing, on=s.OCEL_ID, how="anti"
@@ -87,7 +80,6 @@ def filter_objects_by_attribute(
             states.filter(
                 pl.col(s.OCEL_TIME) <= pl.lit(bound, dtype=pl.Datetime("us", "UTC"))
             )
-            .sort(s.OCEL_TYPE, s.OCEL_ID, s.OCEL_TIME)
             .unique(subset=[s.OCEL_ID], keep="last", maintain_order=True)
             .filter(resolved)
             .select(s.OCEL_ID)

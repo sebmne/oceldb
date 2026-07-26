@@ -7,15 +7,24 @@ license = {text = "MIT"}
 readme = "README.md"
 requires-python = ">=3.11"
 dependencies = [
-    "duckdb>=1.5.1",
+    "defusedxml>=0.7.1",
     "ijson>=3.4.0",
     "polars>=1.35.2",
+]
+
+[project.optional-dependencies]
+sql = [
+    "duckdb>=1.5.1",
     "pyarrow>=24.0.0",
 ]
 
 [dependency-groups]
 dev = [
     "basedpyright>=1.31.0",
+    "duckdb>=1.5.1",
+    "ipykernel>=7.3.0",
+    "mypy>=2.3.0",
+    "pyarrow>=24.0.0",
     "pytest>=9.1.1",
     "ruff>=0.15.10",
 ]
@@ -46,11 +55,11 @@ include = [
 packages = ["src/oceldb"]
 
 [tool.pytest.ini_options]
-pythonpath = ["src", "tests"]
+pythonpath = [".", "src", "tests"]
 testpaths = ["tests"]
 
 [tool.basedpyright]
-include = ["src"]
+include = ["src", "typing_tests"]
 exclude = ["tests"]
 extraPaths = ["src"]
 pythonVersion = "3.11"
@@ -66,3 +75,8 @@ reportUnknownVariableType = false
 # Package-private helpers are shared between the small filter modules.
 reportPrivateUsage = false
 reportUnusedFunction = false
+
+[tool.mypy]
+files = ["typing_tests"]
+python_version = "3.11"
+strict = true

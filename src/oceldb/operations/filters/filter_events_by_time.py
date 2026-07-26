@@ -6,23 +6,22 @@ from oceldb.core import schema as s
 from oceldb.ocel import OCEL
 from oceldb.operations.filters._utils import (
     Mode,
-    TimeBound,
-    TypeScope,
     normalize_time_bound,
 )
 from oceldb.operations.filters.filter_events_by_attribute import (
     filter_events_by_attribute,
 )
 from oceldb.operations.step import step
+from oceldb.types import OneOrMany, TimeLike
 
 
 @step
 def filter_events_by_time(
     ocel: OCEL,
     *,
-    start: TimeBound | None = None,
-    end: TimeBound | None = None,
-    event_types: TypeScope = None,
+    event_types: OneOrMany[str] | None = None,
+    start: TimeLike | None = None,
+    end: TimeLike | None = None,
     mode: Mode = "include",
 ) -> OCEL:
     """Keep or remove events within an inclusive, UTC-normalized time window.
@@ -32,13 +31,13 @@ def filter_events_by_time(
 
     Args:
         ocel: The source log. Omit to get a pipe step instead.
+        event_types: Limits which event types the window applies to; events
+            of other types are left untouched. ``None`` applies it to every
+            type.
         start: Inclusive lower bound (ISO 8601 string, ``date``, or
             ``datetime``). Omit for no lower bound.
         end: Inclusive upper bound, same accepted types as *start*. Omit for
             no upper bound.
-        event_types: Limits which event types the window applies to; events
-            of other types are left untouched. ``None`` applies it to every
-            type.
         mode: ``"include"`` keeps events in the window; ``"exclude"``
             removes them.
 

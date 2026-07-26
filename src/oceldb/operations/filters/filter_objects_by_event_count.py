@@ -6,38 +6,38 @@ from oceldb.core import schema as s
 from oceldb.ocel import OCEL
 from oceldb.operations.filters._utils import (
     Mode,
-    TypeScope,
-    normalize_scope,
+    distinct_counts,
     scoped_match,
     within_bounds,
 )
 from oceldb.operations.pruning import sublog_from_object_ids
 from oceldb.operations.step import step
+from oceldb.types import OneOrMany, normalize_strings
 
 
 @step
 def filter_objects_by_event_count(
     ocel: OCEL,
     *,
+    object_types: OneOrMany[str] | None = None,
+    event_types: OneOrMany[str] | None = None,
     min_count: int | None = None,
     max_count: int | None = None,
-    event_types: TypeScope = None,
-    object_types: TypeScope = None,
     mode: Mode = "include",
 ) -> OCEL:
     """Keep or remove objects by their number of distinct related events.
 
     Args:
         ocel: The source log. Omit to get a pipe step instead.
+        object_types: Limits which object types the count applies to;
+            objects of other types are left untouched. ``None`` applies it
+            to every type.
+        event_types: Only relations to these event types count toward an
+            object's count. ``None`` counts every event type.
         min_count: Inclusive lower bound on distinct related events. Omit
             for no lower bound.
         max_count: Inclusive upper bound on distinct related events. Omit
             for no upper bound.
-        event_types: Only relations to these event types count toward an
-            object's count. ``None`` counts every event type.
-        object_types: Limits which object types the count applies to;
-            objects of other types are left untouched. ``None`` applies it
-            to every type.
         mode: ``"include"`` keeps objects within bounds; ``"exclude"``
             removes them.
 
@@ -55,14 +55,17 @@ def filter_objects_by_event_count(
         >>> sub = ocel >> filter_objects_by_event_count(max_count=1, event_types="Pay")
     """
     in_bounds = within_bounds(min_count=min_count, max_count=max_count)
-    e2o = ocel.e2o()
-    if event_types is not None:
-        event_scope = normalize_scope(event_types)
-        assert event_scope is not None
-        e2o = e2o.filter(pl.col(s.OCEL_EVENT_TYPE).is_in(event_scope))
-
-    counts = e2o.group_by(s.OCEL_OBJECT_ID).agg(
-        pl.col(s.OCEL_EVENT_ID).n_unique().alias("_count")
+    event_scope = normalize_strings(event_types, name="event_types", non_empty=True)
+    e2o, sorted_pairs = ocel._e2o_object_oriented()
+    e2o = OCEL._filter_relation(
+        e2o,
+        ((s.OCEL_EVENT_TYPE, event_scope),),
+    )
+    counts = distinct_counts(
+        e2o,
+        group=s.OCEL_OBJECT_ID,
+        value=s.OCEL_EVENT_ID,
+        sorted_pairs=sorted_pairs,
     )
     object_counts = (
         ocel.objects()
@@ -73,7 +76,7 @@ def filter_objects_by_event_count(
     keep = scoped_match(
         in_bounds,
         type_col=s.OCEL_TYPE,
-        scope=normalize_scope(object_types),
+        scope=normalize_strings(object_types, name="object_types", non_empty=True),
         mode=mode,
     )
     return sublog_from_object_ids(

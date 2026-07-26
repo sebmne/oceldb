@@ -1,19 +1,17 @@
 """Compose event-type and object-type filters into an OCEL view."""
 
-from collections.abc import Iterable
-
 from oceldb.ocel import OCEL
 from oceldb.operations.filters import filter_events_by_type, filter_objects_by_type
-from oceldb.operations.filters._utils import normalize_scope
 from oceldb.operations.step import step
+from oceldb.types import OneOrMany, normalize_strings
 
 
 @step
 def view(
     ocel: OCEL,
     *,
-    event_types: str | Iterable[str] | None = None,
-    object_types: str | Iterable[str] | None = None,
+    event_types: OneOrMany[str] | None = None,
+    object_types: OneOrMany[str] | None = None,
 ) -> OCEL:
     """Create a view by composing the canonical type filters.
 
@@ -37,11 +35,9 @@ def view(
     """
     result = ocel
     if event_types is not None:
-        scope = normalize_scope(event_types)
-        assert scope is not None
+        scope = normalize_strings(event_types, name="event_types", non_empty=True)
         result = filter_events_by_type(result, *scope)
     if object_types is not None:
-        scope = normalize_scope(object_types)
-        assert scope is not None
+        scope = normalize_strings(object_types, name="object_types", non_empty=True)
         result = filter_objects_by_type(result, *scope)
     return result

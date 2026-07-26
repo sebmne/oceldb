@@ -6,19 +6,18 @@ from oceldb.core import schema as s
 from oceldb.ocel import OCEL
 from oceldb.operations.filters._utils import (
     Mode,
-    TypeScope,
     _filter_objects_direct,
-    normalize_scope,
     scoped_match,
 )
 from oceldb.operations.step import step
+from oceldb.types import OneOrMany, normalize_strings
 
 
 @step
 def filter_objects_by_id(
     ocel: OCEL,
     *ids: str,
-    object_types: TypeScope = None,
+    object_types: OneOrMany[str] | None = None,
     mode: Mode = "include",
 ) -> OCEL:
     """Keep or remove objects whose ``ocel_id`` is in *ids*.
@@ -41,10 +40,22 @@ def filter_objects_by_id(
         >>> sub = filter_objects_by_id(ocel, "o1", "o2")
         >>> sub = ocel >> filter_objects_by_id("o1", mode="exclude")
     """
+    selected = normalize_strings(ids, name="ids", non_empty=True)
+    scope = normalize_strings(object_types, name="object_types", non_empty=True)
     keep = scoped_match(
-        pl.col(s.OCEL_ID).is_in(list(ids)),
+        pl.col(s.OCEL_ID).is_in(selected),
         type_col=s.OCEL_TYPE,
-        scope=normalize_scope(object_types),
+        scope=scope,
         mode=mode,
     )
-    return _filter_objects_direct(ocel, keep)
+    relation_keep = scoped_match(
+        pl.col(s.OCEL_OBJECT_ID).is_in(selected),
+        type_col=s.OCEL_OBJECT_TYPE,
+        scope=scope,
+        mode=mode,
+    )
+    return _filter_objects_direct(
+        ocel,
+        object_predicate=keep,
+        relation_predicate=relation_keep,
+    )

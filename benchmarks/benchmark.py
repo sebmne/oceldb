@@ -1,142 +1,720 @@
-"""Reproducible native-storage benchmarks for oceldb.
+"""Deterministic synthetic benchmarks for oceldb.
 
 Run ``python benchmarks/benchmark.py --help`` from the repository root.
 """
 
+from __future__ import annotations
+
 import argparse
-import gc
+from dataclasses import asdict, dataclass, fields, replace
+import importlib.metadata
 import json
-import math
 import os
 import platform
-import resource
+from pathlib import Path
 import statistics
 import subprocess
 import sys
 import tempfile
 import time
-import urllib.parse
-from collections.abc import Callable, Mapping
-from pathlib import Path
+from collections.abc import Callable
 from typing import Any
 
-import duckdb
 import polars as pl
 
 from oceldb import OCEL
-from oceldb.operations.filters import (
-    filter_events_by_time,
+from oceldb.operations import (
+    filter_events_by_object_count,
     filter_events_by_type,
     filter_objects_by_event_count,
+    flatten,
+    project,
+    view,
 )
-from oceldb.io import import_ocel
-from oceldb.transformations import flatten, view
+
+try:
+    import resource
+except ImportError:  # pragma: no cover - unavailable on Windows
+    resource = None
 
 JSON = dict[str, Any]
-CASES = (
-    "open",
-    "validate",
-    "describe",
-    "event_count",
-    "event_materialize",
-    "direct_event_materialize",
-    "event_type_count",
-    "direct_event_type_count",
-    "event_time_window",
-    "filter_event_type_core",
-    "stored_view_events",
-    "stored_view_html",
-    "materialize_view",
-    "materialized_view_events",
-    "filter_object_event_count_core",
-    "object_states",
-    "flatten",
-    "native_rewrite",
-    "filtered_native_rewrite",
-    "native_streaming_rewrite",
+
+
+@dataclass(frozen=True)
+class Profile:
+    """Shape and distribution of one deterministic synthetic OCEL."""
+
+    name: str
+    events: int
+    objects: int
+    relations_per_event: int
+    states_per_object: int
+    o2o_per_object: int
+    event_types: int
+    object_types: int
+    event_attributes: int
+    object_attributes: int
+    qualifiers: int
+    relationless_event_fraction: float
+    relationless_object_fraction: float
+    type_skew: float
+    seed: int
+    batch_size: int
+
+    @property
+    def related_events(self) -> int:
+        """Number of events that receive E2O relations."""
+        return int(self.events * (1.0 - self.relationless_event_fraction))
+
+    @property
+    def related_objects(self) -> int:
+        """Number of objects eligible as E2O targets."""
+        return int(self.objects * (1.0 - self.relationless_object_fraction))
+
+    @property
+    def rows(self) -> dict[str, int]:
+        """Expected row count of every logical table."""
+        return {
+            "events": self.events,
+            "objects": self.objects,
+            "object_changes": self.objects * self.states_per_object,
+            "e2o": self.related_events * self.relations_per_event,
+            "o2o": self.objects * self.o2o_per_object,
+        }
+
+    def validate(self) -> None:
+        """Reject profiles that cannot form a valid, useful OCEL."""
+        positive = {
+            "events": self.events,
+            "objects": self.objects,
+            "relations_per_event": self.relations_per_event,
+            "states_per_object": self.states_per_object,
+            "event_types": self.event_types,
+            "object_types": self.object_types,
+            "qualifiers": self.qualifiers,
+            "batch_size": self.batch_size,
+        }
+        for name, value in positive.items():
+            if isinstance(value, bool) or value <= 0:
+                raise ValueError(f"{name} must be a positive integer.")
+        non_negative = {
+            "o2o_per_object": self.o2o_per_object,
+            "event_attributes": self.event_attributes,
+            "object_attributes": self.object_attributes,
+        }
+        for name, value in non_negative.items():
+            if isinstance(value, bool) or value < 0:
+                raise ValueError(f"{name} must be a non-negative integer.")
+        fractions = {
+            "relationless_event_fraction": self.relationless_event_fraction,
+            "relationless_object_fraction": self.relationless_object_fraction,
+            "type_skew": self.type_skew,
+        }
+        for name, value in fractions.items():
+            if not 0.0 <= value < 1.0:
+                raise ValueError(f"{name} must be in [0, 1).")
+        if self.event_types > self.events:
+            raise ValueError("event_types must not exceed events.")
+        if self.object_types > self.objects:
+            raise ValueError("object_types must not exceed objects.")
+        if self.related_events < 1:
+            raise ValueError("At least one event must have an E2O relation.")
+        if self.related_objects < self.relations_per_event:
+            raise ValueError(
+                "The related object population must be at least relations_per_event."
+            )
+        if self.states_per_object > 1 and self.object_attributes < 1:
+            raise ValueError(
+                "object_attributes must be positive when states_per_object > 1."
+            )
+
+
+PROFILES: dict[str, Profile] = {
+    "small": Profile(
+        name="small",
+        events=50_000,
+        objects=15_000,
+        relations_per_event=3,
+        states_per_object=4,
+        o2o_per_object=1,
+        event_types=8,
+        object_types=5,
+        event_attributes=6,
+        object_attributes=6,
+        qualifiers=6,
+        relationless_event_fraction=0.01,
+        relationless_object_fraction=0.02,
+        type_skew=0.65,
+        seed=17,
+        batch_size=100_000,
+    ),
+    "medium": Profile(
+        name="medium",
+        events=1_000_000,
+        objects=300_000,
+        relations_per_event=3,
+        states_per_object=6,
+        o2o_per_object=2,
+        event_types=20,
+        object_types=10,
+        event_attributes=10,
+        object_attributes=10,
+        qualifiers=12,
+        relationless_event_fraction=0.01,
+        relationless_object_fraction=0.02,
+        type_skew=0.70,
+        seed=17,
+        batch_size=250_000,
+    ),
+    "large": Profile(
+        name="large",
+        events=10_000_000,
+        objects=3_000_000,
+        relations_per_event=4,
+        states_per_object=8,
+        o2o_per_object=2,
+        event_types=40,
+        object_types=20,
+        event_attributes=16,
+        object_attributes=16,
+        qualifiers=20,
+        relationless_event_fraction=0.01,
+        relationless_object_fraction=0.02,
+        type_skew=0.75,
+        seed=17,
+        batch_size=500_000,
+    ),
+}
+
+
+@dataclass(frozen=True)
+class Workload:
+    """One named operation executed in an isolated child process."""
+
+    name: str
+    description: str
+
+
+WORKLOADS = (
+    Workload("open", "manifest and Parquet-footer open"),
+    Workload("validate", "complete logical validation"),
+    Workload("event_full_scan", "full event scan and aggregation"),
+    Workload("event_typed_scan", "partition-pruned event scan"),
+    Workload("e2o_filtered_scan", "denormalized E2O type filter"),
+    Workload("o2o_filtered_scan", "denormalized O2O endpoint-type filter"),
+    Workload("object_states", "forward-filled state reconstruction"),
+    Workload("filter_event_type", "event-type induced sublog"),
+    Workload("filter_event_count", "event related-object count filter"),
+    Workload("filter_object_event_count", "object related-event count filter"),
+    Workload("view", "composed event/object-type view"),
+    Workload("project", "single-object projection"),
+    Workload("flatten", "one object-type classical flattening"),
+    Workload("native_rewrite", "transactional unchanged-native copy"),
+    Workload("filtered_rewrite", "filtered OCEL native write"),
 )
+WORKLOAD_NAMES = tuple(workload.name for workload in WORKLOADS)
 
 
-def synthetic_ocel(
+@dataclass(frozen=True)
+class SyntheticSource:
+    """Batched Parquet source tables used as input to the native writer."""
+
+    root: Path
+    profile: Profile
+
+    def ocel(self) -> OCEL:
+        """Open the generated source parts as one lazy OCEL."""
+        return OCEL.from_frames(
+            events=_scan_parts(self.root / "events"),
+            objects=_scan_parts(self.root / "objects"),
+            object_changes=_scan_parts(self.root / "object_changes"),
+            e2o=_scan_parts(self.root / "e2o"),
+            o2o=_scan_parts(self.root / "o2o"),
+        )
+
+
+def prepare_source(root: Path, profile: Profile) -> SyntheticSource:
+    """Write deterministic source tables in bounded in-memory batches."""
+    profile.validate()
+    root.mkdir(parents=True, exist_ok=True)
+    _write_batches(
+        root / "events",
+        profile.events,
+        profile.batch_size,
+        lambda start, stop: _event_batch(profile, start, stop),
+    )
+    _write_batches(
+        root / "objects",
+        profile.objects,
+        profile.batch_size,
+        lambda start, stop: _object_batch(profile, start, stop),
+    )
+    _write_batches(
+        root / "object_changes",
+        profile.rows["object_changes"],
+        profile.batch_size,
+        lambda start, stop: _change_batch(profile, start, stop),
+    )
+    _write_batches(
+        root / "e2o",
+        profile.rows["e2o"],
+        profile.batch_size,
+        lambda start, stop: _e2o_batch(profile, start, stop),
+    )
+    _write_batches(
+        root / "o2o",
+        profile.rows["o2o"],
+        profile.batch_size,
+        lambda start, stop: _o2o_batch(profile, start, stop),
+    )
+    return SyntheticSource(root=root, profile=profile)
+
+
+def generate_native(
+    path: Path,
+    profile: Profile,
     *,
-    events: int,
-    objects: int,
-    relations_per_event: int,
-    changes_per_object: int,
-    event_types: int,
-    object_types: int,
-) -> OCEL:
-    """Build a deterministic, vectorized synthetic OCEL without Python rows."""
-    _positive("events", events)
-    _positive("objects", objects)
-    _positive("relations_per_event", relations_per_event)
-    _positive("changes_per_object", changes_per_object)
-    _positive("event_types", event_types)
-    _positive("object_types", object_types)
+    overwrite: bool = False,
+    validate: bool = False,
+) -> JSON:
+    """Generate and write one native synthetic snapshot."""
+    profile.validate()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    started = time.perf_counter()
+    with tempfile.TemporaryDirectory(
+        prefix=f".{path.name}.synthetic-source-",
+        dir=path.parent,
+    ) as directory:
+        source = prepare_source(Path(directory), profile)
+        source.ocel().write(path, overwrite=overwrite, validate=validate)
+    return {
+        "path": str(path.resolve()),
+        "profile": asdict(profile),
+        "rows": profile.rows,
+        "seconds": time.perf_counter() - started,
+        "bytes": _dataset_bytes(path),
+    }
 
-    event_index = _indices(events)
-    event_frame = event_index.with_columns(
+
+def run_case(path: Path, case: str) -> JSON:
+    """Execute one workload and return its wall time and peak RSS."""
+    started = time.perf_counter()
+    result = _execute_case(path, case)
+    return {
+        "case": case,
+        "seconds": time.perf_counter() - started,
+        "peak_rss_bytes": _peak_rss_bytes(),
+        "result": result,
+    }
+
+
+def run_benchmarks(
+    path: Path,
+    *,
+    cases: tuple[str, ...],
+    rounds: int,
+    warmups: int,
+    threads: int | None,
+    include_plans: bool = False,
+) -> JSON:
+    """Measure selected workloads in fresh child processes."""
+    if rounds < 1:
+        raise ValueError("rounds must be positive.")
+    if warmups < 0:
+        raise ValueError("warmups must be non-negative.")
+    if threads is not None and threads < 1:
+        raise ValueError("threads must be positive.")
+    unknown = sorted(set(cases) - set(WORKLOAD_NAMES))
+    if unknown:
+        raise ValueError(f"Unknown workloads: {unknown}.")
+
+    measurements: list[JSON] = []
+    for case in cases:
+        for _ in range(warmups):
+            _run_child(path, case, threads=threads)
+        samples = [_run_child(path, case, threads=threads) for _ in range(rounds)]
+        seconds = [float(sample["seconds"]) for sample in samples]
+        peaks = [
+            int(peak)
+            for sample in samples
+            if (peak := sample["peak_rss_bytes"]) is not None
+        ]
+        measurements.append(
+            {
+                "case": case,
+                "description": _workload(case).description,
+                "median_seconds": statistics.median(seconds),
+                "min_seconds": min(seconds),
+                "max_seconds": max(seconds),
+                "max_peak_rss_bytes": max(peaks) if peaks else None,
+                "samples": samples,
+            }
+        )
+
+    report: JSON = {
+        "schema_version": 1,
+        "created_at": _utc_now(),
+        "dataset": {
+            "path": str(path.resolve()),
+            "bytes": _dataset_bytes(path),
+        },
+        "environment": _environment(threads),
+        "rounds": rounds,
+        "warmups": warmups,
+        "measurements": measurements,
+    }
+    if include_plans:
+        report["plans"] = query_plans(path)
+    return report
+
+
+def query_plans(path: Path) -> dict[str, str]:
+    """Return optimized plans for representative lazy workloads."""
+    ocel = OCEL.open(path)
+    event_type = _first(ocel.event_types(), "event type")
+    object_type = _first(ocel.object_types(), "object type")
+    selected_view = view(
+        ocel,
+        event_types=event_type,
+        object_types=object_type,
+    )
+    return {
+        "event_typed_scan": ocel.events(event_type).explain(optimized=True),
+        "e2o_filtered_scan": ocel.e2o(object_types=object_type).explain(optimized=True),
+        "object_states": ocel.object_states(object_type).explain(optimized=True),
+        "view_events": selected_view.events().explain(optimized=True),
+        "view_e2o": selected_view.e2o().explain(optimized=True),
+    }
+
+
+def _execute_case(path: Path, case: str) -> object:
+    ocel = OCEL.open(path)
+    event_type = _first(ocel.event_types(), "event type")
+    object_type = _first(ocel.object_types(), "object type")
+    if case == "open":
+        return {
+            "event_types": len(ocel.event_types()),
+            "object_types": len(ocel.object_types()),
+        }
+    if case == "validate":
+        ocel.validate()
+        return True
+    if case == "event_full_scan":
+        return _row(
+            ocel.events()
+            .select(
+                pl.len().alias("rows"),
+                pl.col("ocel_id").str.len_bytes().sum().alias("id_bytes"),
+                pl.col("ocel_time").cast(pl.Int64).min().alias("first_time"),
+            )
+            .collect(engine="streaming")
+        )
+    if case == "event_typed_scan":
+        return _row(
+            ocel.events(event_type)
+            .select(
+                pl.len().alias("rows"),
+                pl.col("ocel_id").str.len_bytes().sum().alias("id_bytes"),
+                pl.col("ocel_time").cast(pl.Int64).min().alias("first_time"),
+            )
+            .collect(engine="streaming")
+        )
+    if case == "e2o_filtered_scan":
+        return _scalar(
+            ocel.e2o(object_types=object_type)
+            .select(pl.len())
+            .collect(engine="streaming")
+        )
+    if case == "o2o_filtered_scan":
+        return _scalar(
+            ocel.o2o(source_types=object_type)
+            .select(pl.len())
+            .collect(engine="streaming")
+        )
+    if case == "object_states":
+        states = ocel.object_states(object_type)
+        expressions: list[pl.Expr] = [pl.len().alias("rows")]
+        if "object_attr_0" in states.collect_schema():
+            expressions.append(pl.col("object_attr_0").sum().alias("state_value"))
+        return _row(states.select(*expressions).collect(engine="streaming"))
+    if case == "filter_event_type":
+        return _consume_ocel(filter_events_by_type(ocel, event_type))
+    if case == "filter_event_count":
+        return _consume_ocel(
+            filter_events_by_object_count(
+                ocel,
+                min_count=2,
+                object_types=object_type,
+            )
+        )
+    if case == "filter_object_event_count":
+        return _consume_ocel(
+            filter_objects_by_event_count(
+                ocel,
+                object_types=object_type,
+                min_count=2,
+            )
+        )
+    if case == "view":
+        return _consume_ocel(
+            view(
+                ocel,
+                event_types=event_type,
+                object_types=object_type,
+            )
+        )
+    if case == "project":
+        object_id = str(
+            _scalar(
+                ocel.objects(object_type)
+                .select("ocel_id")
+                .limit(1)
+                .collect(engine="streaming")
+            )
+        )
+        return _consume_ocel(project(ocel, object_id))
+    if case == "flatten":
+        flattened = flatten(ocel, object_type)
+        expressions = [pl.len().alias("rows")]
+        if "event_value" in flattened.collect_schema():
+            expressions.append(pl.col("event_value").sum().alias("event_value"))
+        return _row(flattened.select(*expressions).collect(engine="streaming"))
+    if case == "native_rewrite":
+        return _rewrite(ocel)
+    if case == "filtered_rewrite":
+        return _rewrite(filter_events_by_type(ocel, event_type))
+    raise ValueError(f"Unknown workload {case!r}.")
+
+
+def _consume_ocel(ocel: OCEL) -> dict[str, int]:
+    """Execute all five tables while retaining only their row counts."""
+    return {
+        "events": _count(ocel.events()),
+        "objects": _count(ocel.objects()),
+        "object_changes": _count(ocel.object_changes()),
+        "e2o": _count(ocel.e2o()),
+        "o2o": _count(ocel.o2o()),
+    }
+
+
+def _rewrite(ocel: OCEL) -> JSON:
+    with tempfile.TemporaryDirectory() as directory:
+        target = Path(directory) / "snapshot"
+        ocel.write(target)
+        return {"bytes": _dataset_bytes(target)}
+
+
+def _run_child(path: Path, case: str, *, threads: int | None) -> JSON:
+    script = Path(__file__).resolve()
+    environment = os.environ.copy()
+    source = str(script.parents[1] / "src")
+    existing_pythonpath = environment.get("PYTHONPATH")
+    environment["PYTHONPATH"] = (
+        os.pathsep.join((source, existing_pythonpath))
+        if existing_pythonpath
+        else source
+    )
+    if threads is not None:
+        environment["POLARS_MAX_THREADS"] = str(threads)
+    completed = subprocess.run(
+        [sys.executable, str(script), "_case", str(path), case],
+        check=False,
+        capture_output=True,
+        text=True,
+        env=environment,
+    )
+    if completed.returncode:
+        raise RuntimeError(
+            f"Workload {case!r} failed with exit code {completed.returncode}:\n"
+            f"{completed.stderr.strip()}"
+        )
+    try:
+        return json.loads(completed.stdout)
+    except json.JSONDecodeError as exc:
+        raise RuntimeError(
+            f"Workload {case!r} produced invalid JSON:\n{completed.stdout}"
+        ) from exc
+
+
+def _event_batch(profile: Profile, start: int, stop: int) -> pl.DataFrame:
+    frame = _indices(start, stop).with_columns(
+        _type_index(
+            pl.col("_index"),
+            count=profile.event_types,
+            skew=profile.type_skew,
+            seed=profile.seed,
+        ).alias("_type")
+    )
+    attributes = [
+        pl.when(
+            ((pl.col("_type") + index) % min(profile.event_types, 3) == 0)
+            & ((pl.col("_index") + index + profile.seed) % 5 != 0)
+        )
+        .then(_numeric_value(pl.col("_index"), index + profile.seed))
+        .otherwise(None)
+        .cast(pl.Float64)
+        .alias(f"event_attr_{index}")
+        for index in range(profile.event_attributes)
+    ]
+    return frame.with_columns(
         _identifier("e", pl.col("_index")).alias("ocel_id"),
         (
             pl.datetime(2024, 1, 1, time_zone="UTC")
             + pl.duration(seconds=pl.col("_index"))
         ).alias("ocel_time"),
-        (pl.col("_index") % 10_000).cast(pl.Float64).alias("value"),
-        _type_name("event", pl.col("_index") % event_types).alias("ocel_type"),
-    ).select("ocel_id", "ocel_time", "value", "ocel_type")
-
-    object_index = _indices(objects)
-    object_frame = object_index.with_columns(
-        _identifier("o", pl.col("_index")).alias("ocel_id"),
-        _type_name("object", pl.col("_index") % object_types).alias("ocel_type"),
-    ).select("ocel_id", "ocel_type")
-
-    change_frame = (
-        _indices(objects * changes_per_object)
-        .with_columns(
-            (pl.col("_index") // changes_per_object).alias("_object"),
-            (pl.col("_index") % changes_per_object).alias("_change"),
-        )
-        .with_columns(
-            _identifier("o", pl.col("_object")).alias("ocel_id"),
-            (
-                pl.datetime(2023, 1, 1, time_zone="UTC")
-                + pl.duration(days=pl.col("_change"))
-            ).alias("ocel_time"),
-            pl.lit("state").alias("ocel_changed_field"),
-            _type_name("state", pl.col("_change")).alias("state"),
-            _type_name("object", pl.col("_object") % object_types).alias("ocel_type"),
-        )
-        .select(
-            "ocel_id",
-            "ocel_time",
-            "ocel_changed_field",
-            "state",
-            "ocel_type",
-        )
+        _type_name("event", pl.col("_type")).alias("ocel_type"),
+        _numeric_value(pl.col("_index"), profile.seed)
+        .cast(pl.Float64)
+        .alias("event_value"),
+        pl.concat_str(
+            pl.lit("code-"),
+            _numeric_value(pl.col("_index"), profile.seed + 101).cast(pl.String),
+        ).alias("event_code"),
+        *attributes,
+    ).select(
+        "ocel_id",
+        "ocel_time",
+        "ocel_type",
+        "event_value",
+        "event_code",
+        *(f"event_attr_{index}" for index in range(profile.event_attributes)),
     )
 
-    relation_frame = (
-        _indices(events * relations_per_event)
+
+def _object_batch(profile: Profile, start: int, stop: int) -> pl.DataFrame:
+    return (
+        _indices(start, stop)
         .with_columns(
-            (pl.col("_index") // relations_per_event).alias("_event"),
-            (pl.col("_index") % relations_per_event).alias("_slot"),
+            _identifier("o", pl.col("_index")).alias("ocel_id"),
+            _type_name(
+                "object",
+                _type_index(
+                    pl.col("_index"),
+                    count=profile.object_types,
+                    skew=profile.type_skew,
+                    seed=profile.seed + 1,
+                ),
+            ).alias("ocel_type"),
+        )
+        .select("ocel_id", "ocel_type")
+    )
+
+
+def _change_batch(profile: Profile, start: int, stop: int) -> pl.DataFrame:
+    frame = (
+        _indices(start, stop)
+        .with_columns(
+            (pl.col("_index") // profile.states_per_object).alias("_object"),
+            (pl.col("_index") % profile.states_per_object).alias("_state"),
         )
         .with_columns(
-            ((pl.col("_event") * 31 + pl.col("_slot") * 9_973) % objects).alias(
-                "_object"
+            _type_index(
+                pl.col("_object"),
+                count=profile.object_types,
+                skew=profile.type_skew,
+                seed=profile.seed + 1,
+            ).alias("_type")
+        )
+    )
+    if profile.object_attributes:
+        active_attribute = (
+            pl.col("_type") * 2 + pl.col("_state").clip(lower_bound=1) - 1
+        ) % profile.object_attributes
+        changed_field = (
+            pl.when(pl.col("_state") == 0)
+            .then(pl.lit(None, dtype=pl.String))
+            .otherwise(
+                pl.concat_str(
+                    pl.lit("object_attr_"),
+                    active_attribute.cast(pl.String),
+                )
             )
+        )
+        per_type = min(2, profile.object_attributes)
+        attributes = []
+        for index in range(profile.object_attributes):
+            belongs_to_type = (
+                index
+                + profile.object_attributes
+                - ((pl.col("_type") * 2) % profile.object_attributes)
+            ) % profile.object_attributes < per_type
+            has_value = ((pl.col("_state") == 0) & belongs_to_type) | (
+                (pl.col("_state") > 0) & (active_attribute == index)
+            )
+            attributes.append(
+                pl.when(has_value)
+                .then(
+                    _numeric_value(
+                        pl.col("_object") * profile.states_per_object
+                        + pl.col("_state"),
+                        profile.seed + index,
+                    )
+                )
+                .otherwise(None)
+                .cast(pl.Int64)
+                .alias(f"object_attr_{index}")
+            )
+    else:
+        changed_field = pl.lit(None, dtype=pl.String)
+        attributes = []
+    return frame.with_columns(
+        _identifier("o", pl.col("_object")).alias("ocel_id"),
+        (
+            pl.datetime(2023, 1, 1, time_zone="UTC")
+            + pl.duration(days=pl.col("_state"))
+        ).alias("ocel_time"),
+        changed_field.alias("ocel_changed_field"),
+        (pl.col("_state") == 0).alias("ocel_is_initial"),
+        _type_name("object", pl.col("_type")).alias("ocel_type"),
+        *attributes,
+    ).select(
+        "ocel_id",
+        "ocel_time",
+        "ocel_changed_field",
+        "ocel_is_initial",
+        "ocel_type",
+        *(f"object_attr_{index}" for index in range(profile.object_attributes)),
+    )
+
+
+def _e2o_batch(profile: Profile, start: int, stop: int) -> pl.DataFrame:
+    return (
+        _indices(start, stop)
+        .with_columns(
+            (pl.col("_index") // profile.relations_per_event).alias("_event"),
+            (pl.col("_index") % profile.relations_per_event).alias("_slot"),
+        )
+        .with_columns(
+            (
+                (pl.col("_event") * 31 + pl.col("_slot") * 9_973 + profile.seed)
+                % profile.related_objects
+            ).alias("_object")
         )
         .with_columns(
             _identifier("e", pl.col("_event")).alias("ocel_event_id"),
-            _type_name("event", pl.col("_event") % event_types).alias(
-                "ocel_event_type"
-            ),
+            _type_name(
+                "event",
+                _type_index(
+                    pl.col("_event"),
+                    count=profile.event_types,
+                    skew=profile.type_skew,
+                    seed=profile.seed,
+                ),
+            ).alias("ocel_event_type"),
             _identifier("o", pl.col("_object")).alias("ocel_object_id"),
-            _type_name("object", pl.col("_object") % object_types).alias(
-                "ocel_object_type"
-            ),
-            _type_name("role", pl.col("_slot")).alias("ocel_qualifier"),
+            _type_name(
+                "object",
+                _type_index(
+                    pl.col("_object"),
+                    count=profile.object_types,
+                    skew=profile.type_skew,
+                    seed=profile.seed + 1,
+                ),
+            ).alias("ocel_object_type"),
+            _type_name(
+                "role",
+                (pl.col("_slot") + pl.col("_event")) % profile.qualifiers,
+            ).alias("ocel_qualifier"),
         )
         .select(
             "ocel_event_id",
@@ -147,611 +725,425 @@ def synthetic_ocel(
         )
     )
 
-    o2o_frame = (
-        object_index.with_columns(((pl.col("_index") + 1) % objects).alias("_target"))
-        .with_columns(
-            _identifier("o", pl.col("_index")).alias("ocel_source_id"),
-            _type_name("object", pl.col("_index") % object_types).alias(
-                "ocel_source_type"
-            ),
-            _identifier("o", pl.col("_target")).alias("ocel_target_id"),
-            _type_name("object", pl.col("_target") % object_types).alias(
-                "ocel_target_type"
-            ),
-            pl.lit("next").alias("ocel_qualifier"),
+
+def _o2o_batch(profile: Profile, start: int, stop: int) -> pl.DataFrame:
+    if profile.o2o_per_object:
+        frame = (
+            _indices(start, stop)
+            .with_columns(
+                (pl.col("_index") // profile.o2o_per_object).alias("_source"),
+                (pl.col("_index") % profile.o2o_per_object).alias("_slot"),
+            )
+            .with_columns(
+                (
+                    (pl.col("_source") + 1 + pl.col("_slot") * 7_919 + profile.seed)
+                    % profile.objects
+                ).alias("_target")
+            )
         )
-        .select(
-            "ocel_source_id",
-            "ocel_source_type",
-            "ocel_target_id",
-            "ocel_target_type",
-            "ocel_qualifier",
-        )
-    )
-
-    return OCEL.from_frames(
-        events=event_frame.lazy(),
-        objects=object_frame.lazy(),
-        object_changes=change_frame.lazy(),
-        event_object=relation_frame.lazy(),
-        object_object=o2o_frame.lazy(),
-    )
-
-
-def generate_dataset(path: Path, args: argparse.Namespace) -> JSON:
-    log = synthetic_ocel(
-        events=args.events,
-        objects=args.objects,
-        relations_per_event=args.relations_per_event,
-        changes_per_object=args.changes_per_object,
-        event_types=args.event_types,
-        object_types=args.object_types,
-    )
-    started = time.perf_counter()
-    log.write(path, overwrite=args.overwrite)
-    elapsed = time.perf_counter() - started
-    return {
-        "events": args.events,
-        "objects": args.objects,
-        "object_changes": args.objects * args.changes_per_object,
-        "e2o": args.events * args.relations_per_event,
-        "o2o": args.objects,
-        "seconds": elapsed,
-        "rows_per_second": _total_rows(args) / elapsed,
-        "storage_bytes": directory_size(path),
-    }
-
-
-def dataset_context(path: Path) -> JSON:
-    log = OCEL.open(path)
-    summary = log.describe()
-    change_counts = _type_counts(log.object_changes())
-    relation_counts = _type_counts(log.event_object(), column="ocel_object_type")
-    event_type = _largest(summary.event_types)
-    state_type = _largest(change_counts) or _largest(summary.object_types)
-    flatten_type = _largest(relation_counts) or _largest(summary.object_types)
-    event_schema = log.events().collect_schema().names()
-
-    start = summary.start_time
-    end = summary.end_time
-    if start is not None and end is not None:
-        span = end - start
-        window_start = start + span * 0.4
-        window_end = start + span * 0.6
     else:
-        window_start = window_end = None
-
-    return {
-        "events": summary.events,
-        "objects": summary.objects,
-        "object_changes": summary.object_changes,
-        "e2o": summary.e2o,
-        "o2o": summary.o2o,
-        "total_rows": sum(
-            (
-                summary.events,
-                summary.objects,
-                summary.object_changes,
-                summary.e2o,
-                summary.o2o,
-            )
+        frame = _indices(0, 0).with_columns(
+            pl.lit(None, dtype=pl.Int64).alias("_source"),
+            pl.lit(None, dtype=pl.Int64).alias("_slot"),
+            pl.lit(None, dtype=pl.Int64).alias("_target"),
+        )
+    return frame.with_columns(
+        _identifier("o", pl.col("_source")).alias("ocel_source_id"),
+        _type_name(
+            "object",
+            _type_index(
+                pl.col("_source"),
+                count=profile.object_types,
+                skew=profile.type_skew,
+                seed=profile.seed + 1,
+            ),
+        ).alias("ocel_source_type"),
+        _identifier("o", pl.col("_target")).alias("ocel_target_id"),
+        _type_name(
+            "object",
+            _type_index(
+                pl.col("_target"),
+                count=profile.object_types,
+                skew=profile.type_skew,
+                seed=profile.seed + 1,
+            ),
+        ).alias("ocel_target_type"),
+        _type_name("link", pl.col("_slot") % profile.qualifiers).alias(
+            "ocel_qualifier"
         ),
-        "event_type": event_type,
-        "event_type_rows": summary.event_types.get(event_type, 0),
-        "state_type": state_type,
-        "state_type_rows": change_counts.get(state_type, 0),
-        "flatten_type": flatten_type,
-        "flatten_type_rows": relation_counts.get(flatten_type, 0),
-        "window_start": window_start.isoformat() if window_start else None,
-        "window_end": window_end.isoformat() if window_end else None,
-        "has_event_value": "value" in event_schema,
-        "storage_bytes": directory_size(path),
-    }
-
-
-def benchmark_dataset(
-    path: Path,
-    *,
-    rounds: int,
-    warmups: int,
-    threads: int | None,
-) -> JSON:
-    context = dataset_context(path)
-    cases: list[str] = list(CASES)
-    if context["has_event_value"]:
-        cases[4:4] = ["event_value_sum", "direct_event_value_sum"]
-
-    results: list[JSON] = []
-    for case in cases:
-        case_rounds = (
-            min(rounds, 2)
-            if case
-            in {
-                "native_rewrite",
-                "filtered_native_rewrite",
-                "native_streaming_rewrite",
-            }
-            else rounds
-        )
-        command = [
-            sys.executable,
-            str(Path(__file__).resolve()),
-            "_worker",
-            str(path.resolve()),
-            case,
-            "--rounds",
-            str(case_rounds),
-            "--warmups",
-            str(warmups),
-            "--context",
-            json.dumps(context),
-        ]
-        environment = dict(os.environ)
-        environment["PYTHONDONTWRITEBYTECODE"] = "1"
-        if threads is not None:
-            environment["POLARS_MAX_THREADS"] = str(threads)
-        completed = subprocess.run(
-            command,
-            check=True,
-            capture_output=True,
-            text=True,
-            env=environment,
-        )
-        result = json.loads(completed.stdout)
-        rows = work_rows(case, context)
-        result["work_rows"] = rows
-        result["million_rows_per_second"] = (
-            rows / (result["median_ms"] / 1_000) / 1_000_000 if rows else None
-        )
-        results.append(result)
-
-    return {
-        "environment": environment_info(threads),
-        "dataset": context,
-        "results": results,
-    }
-
-
-def benchmark_sqlite_import(
-    source: Path,
-    *,
-    rounds: int,
-    warmups: int,
-    threads: int | None,
-    validation: str,
-) -> JSON:
-    context = {"source_bytes": source.stat().st_size, "validation": validation}
-    command = [
-        sys.executable,
-        str(Path(__file__).resolve()),
-        "_worker",
-        str(source.resolve()),
-        "sqlite_import",
-        "--rounds",
-        str(rounds),
-        "--warmups",
-        str(warmups),
-        "--context",
-        json.dumps(context),
-    ]
-    environment = dict(os.environ)
-    environment["PYTHONDONTWRITEBYTECODE"] = "1"
-    if threads is not None:
-        environment["POLARS_MAX_THREADS"] = str(threads)
-    completed = subprocess.run(
-        command,
-        check=True,
-        capture_output=True,
-        text=True,
-        env=environment,
+    ).select(
+        "ocel_source_id",
+        "ocel_source_type",
+        "ocel_target_id",
+        "ocel_target_type",
+        "ocel_qualifier",
     )
-    return {
-        "environment": environment_info(threads),
-        "source": {"path": str(source), **context},
-        "results": [json.loads(completed.stdout)],
-    }
 
 
-def run_worker(args: argparse.Namespace) -> None:
-    context = json.loads(args.context)
-    path = Path(args.dataset)
-    with tempfile.TemporaryDirectory(prefix="oceldb-benchmark-worker-") as raw:
-        operation = benchmark_operation(args.case, path, context, Path(raw))
-        for _ in range(args.warmups):
-            operation()
-        timings: list[float] = []
-        result: object = None
-        for _ in range(args.rounds):
-            gc.collect()
-            started = time.perf_counter_ns()
-            result = operation()
-            timings.append((time.perf_counter_ns() - started) / 1_000_000)
-        ordered = sorted(timings)
-        p95_index = max(0, math.ceil(0.95 * len(ordered)) - 1)
-        output = {
-            "case": args.case,
-            "rounds": args.rounds,
-            "median_ms": statistics.median(timings),
-            "min_ms": min(timings),
-            "p95_ms": ordered[p95_index],
-            "peak_rss_mib": peak_rss_mib(),
-            "result": result,
-        }
-        print(json.dumps(output, default=str))
-
-
-def benchmark_operation(
-    case: str, path: Path, context: JSON, scratch: Path
-) -> Callable[[], object]:
-    if case == "sqlite_import":
-        target = scratch / "imported"
-        return lambda: _import_sqlite(path, target, str(context["validation"]))
-    if case == "open":
-        return lambda: int(OCEL.open(path) is not None)
-
-    log = OCEL.open(path)
-    event_type = str(context["event_type"])
-    state_type = str(context["state_type"])
-    flatten_type = str(context["flatten_type"])
-
-    if case == "validate":
-        return lambda: _validate(log)
-    if case == "describe":
-        return lambda: log._replace().describe().events
-    if case == "event_count":
-        return lambda: _count(log.events())
-    if case == "event_materialize":
-        return lambda: log.events().collect().height
-    if case == "direct_event_materialize":
-        glob = str(path / "events" / "ocel_type=*" / "data.parquet")
-        return lambda: pl.scan_parquet(glob, hive_partitioning=True).collect().height
-    if case == "event_value_sum":
-        return lambda: log.events().select(pl.col("value").sum()).collect().item()
-    if case == "direct_event_value_sum":
-        glob = str(path / "events" / "ocel_type=*" / "data.parquet")
-        return lambda: (
-            pl.scan_parquet(glob).select(pl.col("value").sum()).collect().item()
+def _write_batches(
+    directory: Path,
+    rows: int,
+    batch_size: int,
+    build: Callable[[int, int], pl.DataFrame],
+) -> None:
+    directory.mkdir()
+    if rows == 0:
+        build(0, 0).write_parquet(directory / "part-00000.parquet")
+        return
+    for part, start in enumerate(range(0, rows, batch_size)):
+        stop = min(start + batch_size, rows)
+        build(start, stop).write_parquet(
+            directory / f"part-{part:05d}.parquet",
+            compression="lz4",
+            statistics=True,
         )
-    if case == "event_type_count":
-        return lambda: _count(log.events(event_type))
-    if case == "direct_event_type_count":
-        encoded = urllib.parse.quote(event_type, safe="")
-        file = path / "events" / f"ocel_type={encoded}" / "data.parquet"
-        return lambda: _count(pl.scan_parquet(file))
-    if case == "event_time_window":
-        return lambda: _count(
-            filter_events_by_time(
-                log,
-                start=str(context["window_start"]),
-                end=str(context["window_end"]),
-            ).events()
-        )
-    if case == "filter_event_type_core":
-        return lambda: _all_counts(filter_events_by_type(log, event_type))
-    if case == "stored_view_events":
-        filtered = view(
-            log,
-            event_types=event_type,
-            object_types=flatten_type,
-        )
-        return lambda: filtered.events().collect().height
-    if case == "stored_view_html":
-        return lambda: len(
-            view(
-                log,
-                event_types=event_type,
-                object_types=flatten_type,
-            )._repr_html_()
-        )
-    if case == "materialize_view":
-        return lambda: (
-            view(
-                log,
-                event_types=event_type,
-                object_types=flatten_type,
+
+
+def _scan_parts(directory: Path) -> pl.LazyFrame:
+    return pl.scan_parquet(directory / "*.parquet")
+
+
+def _indices(start: int, stop: int) -> pl.DataFrame:
+    return pl.DataFrame(
+        {
+            "_index": pl.int_range(
+                start,
+                stop,
+                dtype=pl.Int64,
+                eager=True,
             )
-            .materialize()
-            .describe()
-            .events
-        )
-    if case == "materialized_view_events":
-        filtered = view(
-            log,
-            event_types=event_type,
-            object_types=flatten_type,
-        ).materialize()
-        return lambda: filtered.events().collect().height
-    if case == "filter_object_event_count_core":
-        return lambda: _all_counts(filter_objects_by_event_count(log, min_count=2))
-    if case == "object_states":
-        return lambda: log.object_states(state_type).collect().height
-    if case == "flatten":
-        return lambda: flatten(log, flatten_type).collect().height
-    if case == "native_rewrite":
-        target = scratch / "rewrite"
-        return lambda: _rewrite(log, target)
-    if case == "filtered_native_rewrite":
-        target = scratch / "filtered-rewrite"
-        filtered = filter_events_by_type(log, event_type)
-        return lambda: _rewrite(filtered, target)
-    if case == "native_streaming_rewrite":
-        target = scratch / "streaming-rewrite"
-        return lambda: _streaming_rewrite(log, target)
-    raise ValueError(f"Unknown benchmark case: {case}")
-
-
-def print_report(payload: JSON) -> None:
-    context = payload["dataset"]
-    environment = payload["environment"]
-    print(
-        f"Dataset: {context['events']:,} events, {context['objects']:,} objects, "
-        f"{context['e2o']:,} E2O, {_mib(context['storage_bytes']):.1f} MiB"
+        }
     )
-    print(
-        f"Runtime: Python {environment['python']}, Polars {environment['polars']}, "
-        f"DuckDB {environment['duckdb']}, {environment['threads']} Polars threads"
-    )
-    print()
-    print(
-        f"{'case':36} {'median ms':>10} {'p95 ms':>10} "
-        f"{'peak MiB':>10} {'M rows/s':>10}"
-    )
-    print("-" * 82)
-    for result in payload["results"]:
-        throughput = result["million_rows_per_second"]
-        throughput_text = f"{throughput:.2f}" if throughput is not None else "-"
-        print(
-            f"{result['case']:36} {result['median_ms']:10.2f} "
-            f"{result['p95_ms']:10.2f} {result['peak_rss_mib']:10.1f} "
-            f"{throughput_text:>10}"
-        )
-
-
-def print_sqlite_report(payload: JSON) -> None:
-    source = payload["source"]
-    result = payload["results"][0]
-    print(f"SQLite source: {_mib(source['source_bytes']):.1f} MiB ({source['path']})")
-    print(
-        f"sqlite_import ({source['validation']} validation): "
-        f"median {result['median_ms']:.2f} ms, "
-        f"p95 {result['p95_ms']:.2f} ms, peak {result['peak_rss_mib']:.1f} MiB"
-    )
-
-
-def work_rows(case: str, context: JSON) -> int | None:
-    if case in {
-        "event_count",
-        "event_materialize",
-        "direct_event_materialize",
-        "event_value_sum",
-        "direct_event_value_sum",
-    }:
-        return int(context["events"])
-    if case in {"event_type_count", "direct_event_type_count"}:
-        return int(context["event_type_rows"])
-    if case == "event_time_window":
-        return int(context["events"])
-    if case == "object_states":
-        return int(context["state_type_rows"])
-    if case == "flatten":
-        return int(context["flatten_type_rows"])
-    if case in {
-        "validate",
-        "describe",
-        "native_rewrite",
-        "filtered_native_rewrite",
-        "native_streaming_rewrite",
-    }:
-        return int(context["total_rows"])
-    return None
-
-
-def environment_info(threads: int | None) -> JSON:
-    return {
-        "platform": platform.platform(),
-        "machine": platform.machine(),
-        "processor": platform.processor(),
-        "cpu_count": os.cpu_count(),
-        "python": platform.python_version(),
-        "polars": pl.__version__,
-        "duckdb": duckdb.__version__,
-        "threads": threads if threads is not None else pl.thread_pool_size(),
-    }
-
-
-def peak_rss_mib() -> float:
-    value = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
-    divisor = 1024 * 1024 if sys.platform == "darwin" else 1024
-    return float(value) / divisor
-
-
-def directory_size(path: Path) -> int:
-    return sum(file.stat().st_size for file in path.rglob("*") if file.is_file())
-
-
-def _indices(count: int) -> pl.DataFrame:
-    return pl.DataFrame({"_index": pl.arange(0, count, eager=True, dtype=pl.Int64)})
 
 
 def _identifier(prefix: str, index: pl.Expr) -> pl.Expr:
-    return pl.concat_str([pl.lit(prefix), index.cast(pl.String)])
+    return pl.concat_str(pl.lit(prefix), index.cast(pl.String))
 
 
 def _type_name(prefix: str, index: pl.Expr) -> pl.Expr:
-    return pl.concat_str([pl.lit(f"{prefix}_"), index.cast(pl.String)])
+    return pl.concat_str(pl.lit(f"{prefix}-"), index.cast(pl.String))
 
 
-def _type_counts(frame: pl.LazyFrame, *, column: str = "ocel_type") -> dict[str, int]:
-    counts = frame.group_by(column).len().collect()
-    return {
-        str(name): int(count) for name, count in counts.iter_rows() if name is not None
-    }
+def _type_index(
+    index: pl.Expr,
+    *,
+    count: int,
+    skew: float,
+    seed: int,
+) -> pl.Expr:
+    if count == 1:
+        return pl.lit(0, dtype=pl.Int64)
+    threshold = int(skew * 1_000)
+    bucket = (index + seed) % 1_000
+    return (
+        pl.when(index < count)
+        .then(index)
+        .otherwise(
+            pl.when(bucket < threshold)
+            .then(pl.lit(0))
+            .otherwise(1 + (((index + seed) // 1_000) % (count - 1)))
+        )
+        .cast(pl.Int64)
+    )
 
 
-def _largest(counts: Mapping[str, int]) -> str:
-    return max(counts.items(), key=lambda item: item[1])[0] if counts else ""
+def _numeric_value(index: pl.Expr, salt: int) -> pl.Expr:
+    return ((index * 1_000_003 + salt * 97_409) % 2_147_483_647).cast(pl.Int64)
 
 
 def _count(frame: pl.LazyFrame) -> int:
-    return int(frame.select(pl.len()).collect().item())
+    return int(_scalar(frame.select(pl.len()).collect(engine="streaming")))
 
 
-def _all_counts(log: OCEL) -> int:
-    return sum(
-        _count(frame)
-        for frame in (
-            log.events(),
-            log.objects(),
-            log.object_changes(),
-            log.event_object(),
-            log.object_object(),
-        )
+def _scalar(frame: pl.DataFrame) -> object:
+    return _json_scalar(frame.item())
+
+
+def _row(frame: pl.DataFrame) -> JSON:
+    return {
+        name: _json_scalar(value) for name, value in frame.row(0, named=True).items()
+    }
+
+
+def _json_scalar(value: object) -> object:
+    if hasattr(value, "item"):
+        value = value.item()  # type: ignore[union-attr]
+    return value
+
+
+def _first(values: list[str], context: str) -> str:
+    if not values:
+        raise ValueError(f"Benchmark dataset has no {context}.")
+    return values[0]
+
+
+def _dataset_bytes(path: Path) -> int:
+    return sum(file.stat().st_size for file in path.rglob("*") if file.is_file())
+
+
+def _peak_rss_bytes() -> int | None:
+    if resource is None:
+        return None
+    maximum = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
+    return int(maximum if platform.system() == "Darwin" else maximum * 1_024)
+
+
+def _environment(threads: int | None) -> JSON:
+    try:
+        version = importlib.metadata.version("oceldb")
+    except importlib.metadata.PackageNotFoundError:
+        version = "local"
+    return {
+        "oceldb": version,
+        "polars": pl.__version__,
+        "python": platform.python_version(),
+        "implementation": platform.python_implementation(),
+        "platform": platform.platform(),
+        "machine": platform.machine(),
+        "processor": platform.processor(),
+        "polars_max_threads": threads,
+    }
+
+
+def _utc_now() -> str:
+    from datetime import datetime, timezone
+
+    return datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+
+
+def _workload(name: str) -> Workload:
+    return next(workload for workload in WORKLOADS if workload.name == name)
+
+
+def _profile_from_args(args: argparse.Namespace) -> Profile:
+    profile = PROFILES[args.profile]
+    updates: dict[str, object] = {}
+    for field in fields(Profile):
+        if field.name == "name":
+            continue
+        value = getattr(args, field.name, None)
+        if value is not None:
+            updates[field.name] = value
+    if updates:
+        updates["name"] = f"{profile.name}-custom"
+    result = replace(profile, **updates)
+    result.validate()
+    return result
+
+
+def _selected_cases(values: list[str] | None) -> tuple[str, ...]:
+    if values is None:
+        return WORKLOAD_NAMES
+    return tuple(dict.fromkeys(values))
+
+
+def _add_profile_arguments(command: argparse.ArgumentParser) -> None:
+    command.add_argument("--profile", choices=tuple(PROFILES), default="small")
+    integer_fields = (
+        "events",
+        "objects",
+        "relations_per_event",
+        "states_per_object",
+        "o2o_per_object",
+        "event_types",
+        "object_types",
+        "event_attributes",
+        "object_attributes",
+        "qualifiers",
+        "seed",
+        "batch_size",
     )
-
-
-def _validate(log: OCEL) -> int:
-    log.validate()
-    return 1
-
-
-def _rewrite(log: OCEL, target: Path) -> int:
-    log.write(target, overwrite=True)
-    return directory_size(target)
-
-
-def _streaming_rewrite(log: OCEL, target: Path) -> int:
-    detached = OCEL.from_frames(
-        events=log.events(),
-        objects=log.objects(),
-        object_changes=log.object_changes(),
-        event_object=log.event_object(),
-        object_object=log.object_object(),
-        metadata=log.metadata,
+    for name in integer_fields:
+        command.add_argument(f"--{name.replace('_', '-')}", dest=name, type=int)
+    float_fields = (
+        "relationless_event_fraction",
+        "relationless_object_fraction",
+        "type_skew",
     )
-    detached.write(target, overwrite=True)
-    return directory_size(target)
+    for name in float_fields:
+        command.add_argument(f"--{name.replace('_', '-')}", dest=name, type=float)
 
 
-def _import_sqlite(source: Path, target: Path, validation: str) -> int:
-    import_ocel(source, target, overwrite=True, validation=validation)  # type: ignore[arg-type]
-    return directory_size(target)
-
-
-def _positive(name: str, value: int) -> None:
-    if value <= 0:
-        raise ValueError(f"{name} must be positive.")
-
-
-def _total_rows(args: argparse.Namespace) -> int:
-    return (
-        args.events
-        + args.objects
-        + args.objects * args.changes_per_object
-        + args.events * args.relations_per_event
-        + args.objects
+def _add_run_arguments(command: argparse.ArgumentParser) -> None:
+    command.add_argument(
+        "--case",
+        dest="cases",
+        action="append",
+        choices=WORKLOAD_NAMES,
+        help="Workload to run; repeat to select multiple. Defaults to all.",
     )
-
-
-def _mib(value: int) -> float:
-    return value / (1024 * 1024)
-
-
-def add_profile_arguments(parser: argparse.ArgumentParser) -> None:
-    parser.add_argument("--events", type=int, default=250_000)
-    parser.add_argument("--objects", type=int, default=75_000)
-    parser.add_argument("--relations-per-event", type=int, default=3)
-    parser.add_argument("--changes-per-object", type=int, default=2)
-    parser.add_argument("--event-types", type=int, default=8)
-    parser.add_argument("--object-types", type=int, default=6)
+    command.add_argument("--rounds", type=int, default=3)
+    command.add_argument("--warmups", type=int, default=1)
+    command.add_argument("--threads", type=int)
+    command.add_argument("--include-plans", action="store_true")
+    command.add_argument("--json", action="store_true", dest="json_output")
+    command.add_argument("--output", type=Path)
 
 
 def parser() -> argparse.ArgumentParser:
-    root = argparse.ArgumentParser(description=__doc__)
-    commands = root.add_subparsers(dest="command", required=True)
+    result = argparse.ArgumentParser(description=__doc__)
+    commands = result.add_subparsers(dest="command", required=True)
 
-    generate = commands.add_parser("generate", help="write a synthetic native dataset")
-    generate.add_argument("dataset", type=Path)
-    add_profile_arguments(generate)
-    generate.add_argument("--overwrite", action="store_true")
-
-    run = commands.add_parser("run", help="benchmark an existing native dataset")
-    run.add_argument("dataset", type=Path)
-    run.add_argument("--rounds", type=int, default=5)
-    run.add_argument("--warmups", type=int, default=1)
-    run.add_argument("--threads", type=int)
-    run.add_argument("--output", type=Path)
-
-    sqlite = commands.add_parser(
-        "sqlite-import", help="benchmark SQLite-to-native import"
+    generate_command = commands.add_parser(
+        "generate",
+        help="Generate a reusable synthetic native snapshot.",
     )
-    sqlite.add_argument("source", type=Path)
-    sqlite.add_argument("--rounds", type=int, default=3)
-    sqlite.add_argument("--warmups", type=int, default=1)
-    sqlite.add_argument("--threads", type=int)
-    sqlite.add_argument(
-        "--validation", choices=("strict", "warn", "none"), default="none"
-    )
-    sqlite.add_argument("--output", type=Path)
+    generate_command.add_argument("path", type=Path)
+    _add_profile_arguments(generate_command)
+    generate_command.add_argument("--overwrite", action="store_true")
+    generate_command.add_argument("--validate", action="store_true")
 
-    suite = commands.add_parser(
-        "suite", help="generate and benchmark a temporary dataset"
+    run_command = commands.add_parser(
+        "run",
+        help="Benchmark an existing native snapshot.",
     )
-    add_profile_arguments(suite)
-    suite.add_argument("--rounds", type=int, default=5)
-    suite.add_argument("--warmups", type=int, default=1)
-    suite.add_argument("--threads", type=int)
-    suite.add_argument("--output", type=Path)
-    suite.set_defaults(overwrite=False)
+    run_command.add_argument("path", type=Path)
+    _add_run_arguments(run_command)
 
-    worker = commands.add_parser("_worker", help=argparse.SUPPRESS)
-    worker.add_argument("dataset")
-    worker.add_argument("case")
-    worker.add_argument("--rounds", type=int, required=True)
-    worker.add_argument("--warmups", type=int, required=True)
-    worker.add_argument("--context", required=True)
-    return root
+    suite_command = commands.add_parser(
+        "suite",
+        help="Generate a synthetic snapshot and benchmark it.",
+    )
+    _add_profile_arguments(suite_command)
+    _add_run_arguments(suite_command)
+    suite_command.add_argument(
+        "--dataset",
+        type=Path,
+        help="Keep the generated dataset at this path.",
+    )
+    suite_command.add_argument("--overwrite", action="store_true")
+    suite_command.add_argument("--validate-generation", action="store_true")
+
+    plans_command = commands.add_parser(
+        "plans",
+        help="Print representative optimized Polars query plans as JSON.",
+    )
+    plans_command.add_argument("path", type=Path)
+    plans_command.add_argument("--output", type=Path)
+
+    case_command = commands.add_parser("_case")
+    case_command.add_argument("path", type=Path)
+    case_command.add_argument("case", choices=WORKLOAD_NAMES)
+    return result
+
+
+def _emit_report(report: JSON, args: argparse.Namespace) -> None:
+    output = getattr(args, "output", None)
+    if output is not None:
+        output.parent.mkdir(parents=True, exist_ok=True)
+        output.write_text(
+            json.dumps(report, indent=2, sort_keys=True) + "\n",
+            encoding="utf-8",
+        )
+    if getattr(args, "json_output", False):
+        print(json.dumps(report, indent=2, sort_keys=True))
+        return
+    _print_report(report)
+    if output is not None:
+        print(f"\nJSON report: {output}")
+
+
+def _print_report(report: JSON) -> None:
+    print(f"Dataset: {report['dataset']['path']}")
+    print(f"Size: {_human_bytes(int(report['dataset']['bytes']))}")
+    print(f"Rounds: {report['rounds']} measured, {report['warmups']} warm-up(s)")
+    print()
+    print(f"{'workload':30} {'median':>12} {'peak RSS':>12}")
+    print("-" * 58)
+    for measurement in report["measurements"]:
+        peak = measurement["max_peak_rss_bytes"]
+        print(
+            f"{measurement['case']:30} "
+            f"{measurement['median_seconds']:>10.4f}s "
+            f"{_human_bytes(peak) if peak is not None else 'n/a':>12}"
+        )
+
+
+def _human_bytes(value: int) -> str:
+    size = float(value)
+    for unit in ("B", "KiB", "MiB", "GiB", "TiB"):
+        if size < 1_024 or unit == "TiB":
+            return f"{size:.1f} {unit}"
+        size /= 1_024
+    raise AssertionError("unreachable")
 
 
 def main() -> None:
     args = parser().parse_args()
-    if args.command == "_worker":
-        run_worker(args)
-        return
     if args.command == "generate":
-        print(json.dumps(generate_dataset(args.dataset, args), indent=2))
+        print(
+            json.dumps(
+                generate_native(
+                    args.path,
+                    _profile_from_args(args),
+                    overwrite=args.overwrite,
+                    validate=args.validate,
+                ),
+                indent=2,
+                sort_keys=True,
+            )
+        )
         return
     if args.command == "run":
-        payload = benchmark_dataset(
-            args.dataset,
-            rounds=args.rounds,
-            warmups=args.warmups,
-            threads=args.threads,
-        )
-    elif args.command == "sqlite-import":
-        payload = benchmark_sqlite_import(
-            args.source,
-            rounds=args.rounds,
-            warmups=args.warmups,
-            threads=args.threads,
-            validation=args.validation,
-        )
-    else:
-        with tempfile.TemporaryDirectory(prefix="oceldb-benchmark-suite-") as raw:
-            dataset = Path(raw) / "synthetic"
-            generation = generate_dataset(dataset, args)
-            payload = benchmark_dataset(
-                dataset,
+        _emit_report(
+            run_benchmarks(
+                args.path,
+                cases=_selected_cases(args.cases),
                 rounds=args.rounds,
                 warmups=args.warmups,
                 threads=args.threads,
+                include_plans=args.include_plans,
+            ),
+            args,
+        )
+        return
+    if args.command == "suite":
+        profile = _profile_from_args(args)
+        if args.dataset is not None:
+            generation = generate_native(
+                args.dataset,
+                profile,
+                overwrite=args.overwrite,
+                validate=args.validate_generation,
             )
-            payload["generation"] = generation
-    if args.command == "sqlite-import":
-        print_sqlite_report(payload)
-    else:
-        print_report(payload)
-    if args.output is not None:
-        args.output.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
+            report = run_benchmarks(
+                args.dataset,
+                cases=_selected_cases(args.cases),
+                rounds=args.rounds,
+                warmups=args.warmups,
+                threads=args.threads,
+                include_plans=args.include_plans,
+            )
+        else:
+            with tempfile.TemporaryDirectory(prefix="oceldb-benchmark-") as directory:
+                dataset = Path(directory) / "native"
+                generation = generate_native(
+                    dataset,
+                    profile,
+                    validate=args.validate_generation,
+                )
+                report = run_benchmarks(
+                    dataset,
+                    cases=_selected_cases(args.cases),
+                    rounds=args.rounds,
+                    warmups=args.warmups,
+                    threads=args.threads,
+                    include_plans=args.include_plans,
+                )
+        report["profile"] = asdict(profile)
+        report["expected_rows"] = profile.rows
+        report["generation"] = generation
+        _emit_report(report, args)
+        return
+    if args.command == "plans":
+        plans = query_plans(args.path)
+        text = json.dumps(plans, indent=2, sort_keys=True) + "\n"
+        if args.output is not None:
+            args.output.parent.mkdir(parents=True, exist_ok=True)
+            args.output.write_text(text, encoding="utf-8")
+        print(text, end="")
+        return
+    print(json.dumps(run_case(args.path, args.case), separators=(",", ":")))
 
 
 if __name__ == "__main__":

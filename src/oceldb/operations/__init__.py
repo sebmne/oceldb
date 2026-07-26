@@ -1,10 +1,18 @@
-"""Public filter and transformation operations on ``OCEL`` logs.
+"""Lazy filters and transformations for :class:`oceldb.OCEL`.
 
-Each operation is a plain function taking an ``OCEL`` (or, for filters,
-also predicate/scope arguments) and returning a derived ``OCEL`` or
-``polars.LazyFrame``. Every operation can be called directly
-(``filter_events_by_type(ocel, "Load")``) or curried into a ``>>`` pipeline
-step (``ocel >> filter_events_by_type("Load")``); see ``oceldb.operations.step``.
+Every operation supports direct and pipeline use::
+
+    filtered = filter_events_by_type(ocel, "Load")
+    filtered = ocel >> filter_events_by_type("Load")
+
+Filters return a new immutable OCEL. Event filters preserve selected
+relationless events and induce object membership through surviving E2O
+relations. Object filters apply the symmetric rule. Relation filters induce
+both endpoint sets. O2O-only filters never change event or object membership.
+
+Required selectors reject empty input. Optional type scopes use ``None`` for
+all types and reject empty iterables. Predicate nulls mean "no match"; include
+mode drops them and exclude mode retains them.
 """
 
 from oceldb.operations.filters import (
@@ -20,10 +28,8 @@ from oceldb.operations.filters import (
     filter_objects_by_id,
     filter_objects_by_o2o_count,
     filter_objects_by_type,
-    sample_events,
-    sample_objects,
 )
-from oceldb.operations.transformations import flatten, project, rename_types, view
+from oceldb.operations.transformations import flatten, project, view
 
 __all__ = [
     "filter_e2o_by_qualifier",
@@ -40,8 +46,5 @@ __all__ = [
     "filter_objects_by_type",
     "flatten",
     "project",
-    "rename_types",
-    "sample_events",
-    "sample_objects",
     "view",
 ]

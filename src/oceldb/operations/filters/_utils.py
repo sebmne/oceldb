@@ -1,34 +1,15 @@
-"""Shared validation and expression helpers for filters."""
+"""Shared validation and expression helpers for public filters."""
 
-from collections.abc import Iterable
 from datetime import date, datetime, timezone
-from math import isfinite
-from typing import Literal, TypeAlias, cast
+from typing import Literal, cast
 
 import polars as pl
 
 from oceldb.core import schema as s
 from oceldb.ocel import OCEL
-from oceldb.operations.pruning import sublog_from_object_ids
+from oceldb.operations.pruning import prune_log, sublog_from_relations
 
 Mode = Literal["include", "exclude"]
-TypeScope: TypeAlias = str | Iterable[str] | None
-TimeBound: TypeAlias = str | date | datetime
-
-
-def normalize_scope(scope: object) -> list[str] | None:
-    """Normalize an optional scalar-or-iterable type scope."""
-    if scope is None:
-        return None
-    if isinstance(scope, str):
-        values = [scope]
-    elif isinstance(scope, Iterable):
-        values = list(scope)
-    else:
-        raise TypeError("A type scope must be a string, iterable of strings, or None.")
-    if not all(isinstance(value, str) for value in values):
-        raise TypeError("Type scopes must contain only strings.")
-    return values
 
 
 def validate_mode(mode: str) -> Mode:
@@ -65,11 +46,25 @@ def scoped_match(
     mode: Mode,
 ) -> pl.Expr:
     """Build a non-null keep expression for a scoped predicate filter."""
+    return scoped_match_many(match, scopes=((type_col, scope),), mode=mode)
+
+
+def scoped_match_many(
+    match: pl.Expr,
+    *,
+    scopes: tuple[tuple[str, list[str] | None], ...],
+    mode: Mode,
+) -> pl.Expr:
+    """Apply a decision only where every supplied type scope matches."""
     decision = match_decision(match, mode)
-    if scope is None:
-        return decision
-    in_scope = pl.col(type_col).is_in(scope).fill_null(False)
-    return (~in_scope) | decision
+    in_scope = pl.lit(True)
+    scoped = False
+    for column, values in scopes:
+        if values is None:
+            continue
+        scoped = True
+        in_scope &= pl.col(column).is_in(values).fill_null(False)
+    return ((~in_scope) | decision) if scoped else decision
 
 
 def match_decision(match: pl.Expr, mode: Mode) -> pl.Expr:
@@ -80,6 +75,36 @@ def match_decision(match: pl.Expr, mode: Mode) -> pl.Expr:
     validate_mode(mode)
     resolved = match.fill_null(False)
     return resolved if mode == "include" else ~resolved
+
+
+def validate_predicate(predicate: object) -> pl.Expr:
+    """Validate a Polars predicate at the public API boundary."""
+    if not isinstance(predicate, pl.Expr):
+        raise TypeError("predicate must be a Polars expression.")
+    return predicate
+
+
+def distinct_counts(
+    relations: pl.LazyFrame,
+    *,
+    group: str,
+    value: str,
+    sorted_pairs: bool,
+) -> pl.LazyFrame:
+    """Count exact distinct endpoint pairs with a sorted streaming fast path."""
+    pairs = relations.select(group, value)
+    if not sorted_pairs:
+        return pairs.group_by(group).agg(pl.col(value).n_unique().alias("_count"))
+    new_pair = (
+        (pl.col(group) != pl.col(group).shift(1))
+        | (pl.col(value) != pl.col(value).shift(1))
+    ).fill_null(True)
+    return (
+        pairs.filter(new_pair)
+        .set_sorted(group)
+        .group_by(group, maintain_order=True)
+        .len(name="_count")
+    )
 
 
 def normalize_time_bound(value: object, *, name: str) -> datetime:
@@ -101,42 +126,35 @@ def normalize_time_bound(value: object, *, name: str) -> datetime:
     return result.astimezone(timezone.utc)
 
 
-def _sample_ids(
-    ids: pl.Series, *, n: object, fraction: object, seed: object
-) -> list[str]:
-    """Sample identifier values by count or fraction, without replacement."""
-    if (n is None) == (fraction is None):
-        raise ValueError("Pass exactly one of n or fraction.")
-    if seed is not None:
-        if isinstance(seed, bool) or not isinstance(seed, int):
-            raise TypeError("seed must be an integer or None.")
-        if seed < 0:
-            raise ValueError("seed must be non-negative.")
-    total = ids.len()
-    if fraction is not None:
-        if isinstance(fraction, bool) or not isinstance(fraction, (int, float)):
-            raise TypeError("fraction must be a number.")
-        if not isfinite(fraction):
-            raise ValueError("fraction must be finite.")
-        if not 0.0 <= fraction <= 1.0:
-            raise ValueError(f"fraction must be in [0, 1], got {fraction}.")
-        count = round(fraction * total)
-    else:
-        if isinstance(n, bool) or not isinstance(n, int):
-            raise TypeError("n must be an integer.")
-        count = n
-        if count < 0:
-            raise ValueError(f"n must be non-negative, got {count}.")
-    count = min(count, total)
-    sampled = ids if count >= total else ids.sample(n=count, seed=seed)
-    return [str(value) for value in sampled.to_list()]
+def _filter_events_direct(
+    ocel: OCEL,
+    *,
+    event_predicate: pl.Expr,
+    relation_predicate: pl.Expr,
+) -> OCEL:
+    """Filter events and E2O through their corresponding denormalized fields."""
+    events = ocel.events().filter(event_predicate)
+    relations = ocel.e2o().filter(relation_predicate)
+    return sublog_from_relations(ocel, relations, events=events)
 
 
-def _filter_objects_direct(ocel: OCEL, predicate: pl.Expr) -> OCEL:
-    """Filter object identities and prune around that authoritative selection."""
-    objects = ocel.objects().filter(predicate)
-    satisfying = objects.select(pl.col(s.OCEL_ID).alias(s.OCEL_OBJECT_ID))
-    return sublog_from_object_ids(ocel, satisfying, objects=objects)
+def _filter_objects_direct(
+    ocel: OCEL,
+    *,
+    object_predicate: pl.Expr,
+    relation_predicate: pl.Expr,
+) -> OCEL:
+    """Filter objects and E2O through their corresponding denormalized fields."""
+    objects = ocel.objects().filter(object_predicate)
+    relations = ocel.e2o().filter(relation_predicate)
+    kept_events = relations.select(s.OCEL_EVENT_ID).unique()
+    events = ocel.events().join(
+        kept_events,
+        left_on=s.OCEL_ID,
+        right_on=s.OCEL_EVENT_ID,
+        how="semi",
+    )
+    return prune_log(ocel, events=events, objects=objects, e2o=relations)
 
 
 def _validate_count(name: str, value: object) -> None:

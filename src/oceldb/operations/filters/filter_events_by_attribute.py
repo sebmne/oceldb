@@ -6,12 +6,12 @@ from oceldb.core import schema as s
 from oceldb.ocel import OCEL
 from oceldb.operations.filters._utils import (
     Mode,
-    TypeScope,
-    normalize_scope,
     scoped_match,
+    validate_predicate,
 )
 from oceldb.operations.pruning import sublog_from_relations
 from oceldb.operations.step import step
+from oceldb.types import OneOrMany, normalize_strings
 
 
 @step
@@ -19,7 +19,7 @@ def filter_events_by_attribute(
     ocel: OCEL,
     predicate: pl.Expr,
     *,
-    event_types: TypeScope = None,
+    event_types: OneOrMany[str] | None = None,
     mode: Mode = "include",
 ) -> OCEL:
     """Keep or remove events matching a Polars predicate.
@@ -49,9 +49,9 @@ def filter_events_by_attribute(
         >>> sub = ocel >> filter_events_by_attribute(pl.col("amount") > 100, mode="exclude")
     """
     keep = scoped_match(
-        predicate,
+        validate_predicate(predicate),
         type_col=s.OCEL_TYPE,
-        scope=normalize_scope(event_types),
+        scope=normalize_strings(event_types, name="event_types", non_empty=True),
         mode=mode,
     )
     events = ocel.events().filter(keep)

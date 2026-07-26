@@ -4,21 +4,20 @@ import polars as pl
 
 from oceldb.core import schema as s
 from oceldb.ocel import OCEL
-from oceldb.operations._utils import replace
 from oceldb.operations.filters._utils import (
     Mode,
-    TypeScope,
-    match_decision,
-    normalize_scope,
+    scoped_match_many,
 )
 from oceldb.operations.step import step
+from oceldb.types import OneOrMany, normalize_strings
 
 
 @step
 def filter_o2o_by_qualifier(
     ocel: OCEL,
     *qualifiers: str,
-    object_types: TypeScope = None,
+    source_types: OneOrMany[str] | None = None,
+    target_types: OneOrMany[str] | None = None,
     mode: Mode = "include",
 ) -> OCEL:
     """Keep or remove O2O relations by ``ocel_qualifier``.
@@ -29,9 +28,10 @@ def filter_o2o_by_qualifier(
     Args:
         ocel: The source log. Omit to get a pipe step instead.
         *qualifiers: One or more qualifier values.
-        object_types: Limits the filter to relations where the source or
-            target object type is in this scope; other relations are left
-            untouched. ``None`` applies it to every type.
+        source_types: Limits the filter to relations whose source has one of
+            these object types. Other relations are left untouched.
+        target_types: Limits the filter to relations whose target has one of
+            these object types. Other relations are left untouched.
         mode: ``"include"`` keeps matching relations; ``"exclude"`` removes
             them.
 
@@ -44,14 +44,27 @@ def filter_o2o_by_qualifier(
         >>> sub = filter_o2o_by_qualifier(ocel, "belongs to")
         >>> sub = ocel >> filter_o2o_by_qualifier("belongs to", mode="exclude")
     """
-    decision = match_decision(pl.col(s.OCEL_QUALIFIER).is_in(list(qualifiers)), mode)
-    scope = normalize_scope(object_types)
-    if scope is None:
-        keep = decision
-    else:
-        in_scope = (
-            pl.col(s.OCEL_SOURCE_TYPE).is_in(scope)
-            | pl.col(s.OCEL_TARGET_TYPE).is_in(scope)
-        ).fill_null(False)
-        keep = (~in_scope) | decision
-    return replace(ocel, o2o=ocel.o2o().filter(keep))
+    selected = normalize_strings(qualifiers, name="qualifiers", non_empty=True)
+    keep = scoped_match_many(
+        pl.col(s.OCEL_QUALIFIER).is_in(selected),
+        scopes=(
+            (
+                s.OCEL_SOURCE_TYPE,
+                normalize_strings(
+                    source_types,
+                    name="source_types",
+                    non_empty=True,
+                ),
+            ),
+            (
+                s.OCEL_TARGET_TYPE,
+                normalize_strings(
+                    target_types,
+                    name="target_types",
+                    non_empty=True,
+                ),
+            ),
+        ),
+        mode=mode,
+    )
+    return ocel._derive(o2o=ocel.o2o().filter(keep))
