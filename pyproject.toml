@@ -80,7 +80,3 @@ reportUnknownVariableType = false
 reportPrivateUsage = false
 reportUnusedFunction = false
 
-[tool.mypy]
-files = ["typing_tests"]
-python_version = "3.11"
-strict = true
