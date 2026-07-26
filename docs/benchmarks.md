@@ -85,3 +85,39 @@ metadata, thread count, raw samples, medians, ranges, and peak RSS. Compare
 numbers only when those inputs match. Cache state and normal system variance
 still apply; investigate sustained changes across multiple samples rather than
 a single outlier.
+
+## External competitor baseline
+
+`benchmarks/competitor_comparison.py` compares oceldb with pinned PM4Py and
+r4pm releases. It does not replace the synthetic regression suite because
+external dependency changes and different execution models would make it
+unsuitable as a stable commit-to-commit gate.
+
+The comparison covers exchange ingestion, repeated access, event-type and
+object-type induced sublogs, time filtering, per-type object-count filtering,
+and classical flattening. A canonical structural summary must match before a
+completed pair is accepted. This prevents different propagation semantics or
+materially different selections from being presented as a performance
+difference.
+
+Operation latency and end-to-end latency are reported independently. PM4Py
+operations and r4pm DataFrame workloads start from eager in-memory OCELs
+loaded during setup. oceldb operations start from a lazy native handle. Peak
+RSS covers both setup and execution because retained input memory is part of
+the production resource requirement.
+
+r4pm is included only for ingestion, repeated loading, and flattening because
+version 0.5.5 does not expose equivalent induced-sublog filters through its
+Python API. Unsupported cells remain empty rather than being implemented by
+the benchmark harness.
+
+Paired runs alternate implementation order and use fresh processes. Keep the
+source file, native snapshot, competitor versions, Python version, thread
+limit, round count, warm-up count, and timeout identical when comparing
+reports. Timeouts and process failures are scale-limit observations; do not
+omit them from a published result.
+
+The ingestion case is not semantically symmetric: oceldb produces durable
+native storage while PM4Py and r4pm's DataFrame API produce in-memory
+representations. Publish that caveat with the result and do not reduce the
+report to a single speed ratio.

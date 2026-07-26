@@ -499,6 +499,52 @@ latency or memory guarantees. Relation density, attribute width, type
 cardinality, storage hardware, cache state, and thread count materially affect
 results.
 
+### Competitive comparison
+
+The same BPIC 2017 source was compared with
+[PM4Py 2.7.22](https://github.com/process-intelligence-solutions/pm4py) and
+[r4pm 0.5.5](https://pypi.org/project/r4pm/). Each cell below contains median
+end-to-end time and maximum peak RSS:
+
+| Workload | oceldb | PM4Py | r4pm |
+| --- | ---: | ---: | ---: |
+| Ingest and summarize | 16.183 s / 164.6 MiB | 19.129 s / 3.0 GiB | 10.686 s / 4.7 GiB |
+| Repeated load and summarize | 0.196 s / 81.1 MiB | 18.329 s / 3.0 GiB | 9.537 s / 4.7 GiB |
+| Event-type induced sublog | 0.117 s / 82.0 MiB | 18.362 s / 3.0 GiB | — |
+| Object-type induced sublog | 0.114 s / 92.8 MiB | 18.547 s / 3.0 GiB | — |
+| Timestamp-induced sublog | 0.531 s / 145.2 MiB | 20.116 s / 3.0 GiB | — |
+| Object-count induced sublog | 0.531 s / 313.8 MiB | 29.639 s / 3.0 GiB | — |
+| Flatten on `Offer` | 0.075 s / 136.4 MiB | 18.024 s / 3.0 GiB | 6.603 s / 4.0 GiB |
+
+End-to-end time includes opening oceldb's native snapshot or importing the
+exchange file for a competitor. With the input representation ready, the
+operation medians were:
+
+| Workload | oceldb | PM4Py | r4pm |
+| --- | ---: | ---: | ---: |
+| Event-type induced sublog | 111 ms | 651 ms | — |
+| Object-type induced sublog | 108 ms | 703 ms | — |
+| Timestamp-induced sublog | 526 ms | 2.274 s | — |
+| Object-count induced sublog | 526 ms | 11.876 s | — |
+| Flatten on `Offer` | 70 ms | 179 ms | 663 ms |
+
+r4pm was the fastest eager SQLite importer in this measurement. oceldb's
+ingestion additionally created durable native storage and used substantially
+less peak memory. Its conversion cost was recovered after approximately one
+repeated access relative to PM4Py and two relative to r4pm.
+
+r4pm 0.5.5 does not expose equivalent induced-sublog filters through its
+Python API, so the benchmark leaves those cells empty rather than implementing
+substitutes. Every supported workload completed without an error or timeout
+and passed the canonical structural-result gate.
+
+These measurements used macOS arm64, CPython 3.13.12, Polars 1.41.2, pandas
+3.0.5, one worker thread, three measured rounds, one warm-up, and a five-minute
+per-sample timeout. Measured ingestion used `batch_size=10_000` and disabled
+oceldb's additional full logical-validation pass because neither competitor
+performs an equivalent step. PM4Py and r4pm produced eager in-memory
+representations; oceldb produced a durable native snapshot.
+
 Reproduce the operation benchmark:
 
 ```bash
@@ -519,6 +565,27 @@ uv run python benchmarks/conversion.py /path/to/source.sqlite \
   --rounds 1 \
   --output /tmp/oceldb-conversion.json
 ```
+
+Run the optional, correctness-gated competitor comparison:
+
+```bash
+uv sync --group benchmark
+
+uv run --group benchmark python benchmarks/competitor_comparison.py \
+  /path/to/source.sqlite \
+  --native /path/to/native-ocel \
+  --rounds 3 \
+  --warmups 1 \
+  --threads 1 \
+  --timeout 300 \
+  --output /tmp/oceldb-competitors.json
+```
+
+This comparison reports operation and end-to-end times separately, records
+peak RSS and failures, and rejects completed workload pairs whose canonical
+result summaries differ. It is intentionally separate from the internal
+regression suite. See the benchmark documentation for the execution-model and
+ingestion caveats.
 
 See [benchmarks/README.md](benchmarks/README.md) and
 [docs/benchmarks.md](docs/benchmarks.md) for profiles, workload definitions,
