@@ -63,7 +63,7 @@ pythonpath = [".", "src", "tests"]
 testpaths = ["tests"]
 
 [tool.basedpyright]
-include = ["src", "typing_tests"]
+include = ["src"]
 exclude = ["tests"]
 extraPaths = ["src"]
 pythonVersion = "3.11"
