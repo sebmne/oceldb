@@ -1,6 +1,6 @@
 [project]
 name = "oceldb"
-version = "0.9.1"
+version = "0.10.0"
 description = "Polars-backed OCEL 2.0 event log access with lazy queries"
 authors = [{name = "Sebastian Menne", email = "sebastian.menne@rwth-aachen.de"}]
 license = {text = "MIT"}
