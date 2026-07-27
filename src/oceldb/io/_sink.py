@@ -178,7 +178,16 @@ class TableSink:
                 present = [
                     name
                     for name in attributes
-                    if typed.get_column(name).null_count() < typed.height
+                    if (
+                        typed.get_column(name).null_count() < typed.height
+                        or (
+                            s.OCEL_CHANGED_FIELD in core_schema
+                            and typed.get_column(s.OCEL_CHANGED_FIELD)
+                            .eq(name)
+                            .fill_null(False)
+                            .any()
+                        )
+                    )
                 ]
                 partition = output / f"ocel_type={quote(type_name, safe='')}"
                 partition.mkdir(exist_ok=True)

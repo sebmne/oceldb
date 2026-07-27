@@ -34,6 +34,27 @@ sqlite_log = convert_sqlite("log.sqlite", "sqlite.oceldb")
 
 All conversion functions return an opened, lazy `OCEL`.
 
+### Null attribute changes
+
+Some OCEL producers encode attribute removal with a null timed object
+attribute. OCELDB imports these values as tombstones: the named attribute
+becomes null at that timestamp, and later object states do not forward-fill
+its previous value.
+
+The accepted exchange representations are:
+
+- SQLite: `ocel_changed_field` names an attribute whose column is `NULL`.
+- JSON: a timed object attribute has `"value": null`.
+- XML: a timed object `<attribute>` is empty, has `xsi:nil="true"`, or contains
+  the common serializer sentinel `null` or `None`.
+
+Null event attributes and null initial object attributes are retained as
+missing values but do not remove a prior value. Tombstone handling is a
+compatibility extension because OCEL 2.0 does not define a distinct
+attribute-removal value. XML cannot distinguish a null from an empty string
+when both are serialized as an empty element; OCELDB interprets an empty
+attribute element, and the exact sentinel strings `null` and `None`, as null.
+
 ## Memory and execution model
 
 Converters never build the complete OCEL as Python objects:

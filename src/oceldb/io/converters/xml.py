@@ -9,6 +9,7 @@ import xml.etree.ElementTree as ElementTree
 
 from defusedxml import ElementTree as SafeElementTree
 from defusedxml.common import DefusedXmlException
+import polars as pl
 
 from oceldb import OCEL
 from oceldb.core import schema as s
@@ -23,6 +24,8 @@ from oceldb.io._schema import (
 from oceldb.io._relations import RelationIndex
 from oceldb.io._sink import TableSink
 from oceldb.io._values import EPOCH, attribute_value, timestamp
+
+_XSI_NIL = "{http://www.w3.org/2001/XMLSchema-instance}nil"
 
 
 def convert(
@@ -159,11 +162,10 @@ def _convert_events(
                 name,
                 context=attribute_context,
             )
-            row[name] = attribute_value(
-                attribute.text if attribute.text is not None else "",
+            row[name] = _xml_attribute_value(
+                attribute,
                 declared,
                 schema.event_attributes[name],
-                style="xml",
                 context=f"{attribute_context}.value",
             )
         sink.add("events", row)
@@ -226,11 +228,10 @@ def _convert_objects(
                 attribute.get("time"),
                 context=f"{attribute_context}.time",
             )
-            value = attribute_value(
-                attribute.text if attribute.text is not None else "",
+            value = _xml_attribute_value(
+                attribute,
                 declared,
                 schema.object_attributes[name],
-                style="xml",
                 context=f"{attribute_context}.value",
             )
             if changed_at == EPOCH:
@@ -323,6 +324,33 @@ def _declared_attribute(
     if declared is None:
         raise conversion_error(context, f"undeclared attribute {name!r}")
     return declared
+
+
+def _xml_attribute_value(
+    attribute: ElementTree.Element,
+    declared: AttributeType,
+    storage_dtype: pl.DataType,
+    *,
+    context: str,
+) -> object:
+    nil = attribute.get(_XSI_NIL)
+    if nil is not None:
+        normalized = nil.strip().lower()
+        if normalized in {"true", "1"}:
+            return None
+        if normalized not in {"false", "0"}:
+            raise conversion_error(context, "xsi:nil must be true, false, 1, or 0")
+    if attribute.text is None:
+        return None
+    if attribute.text.strip() in {"None", "null"}:
+        return None
+    return attribute_value(
+        attribute.text,
+        declared,
+        storage_dtype,
+        style="xml",
+        context=context,
+    )
 
 
 def _relationship_target(

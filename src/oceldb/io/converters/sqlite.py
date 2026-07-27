@@ -536,16 +536,6 @@ def _validate_changed_fields(
             context,
             "ocel_changed_field names an undeclared attribute",
         )
-    if not names:
-        return
-    missing_value = pl.any_horizontal(
-        (changed == name) & pl.col(name).is_null() for name in names
-    )
-    if frame.select(missing_value.any()).item():
-        raise conversion_error(
-            context,
-            "a changed attribute has a null value",
-        )
 
 
 def _invalid_typed_events(

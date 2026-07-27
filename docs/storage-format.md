@@ -151,23 +151,26 @@ Path: `object_changes/ocel_type=<type>/*.parquet`
 
 Parts are sorted by `(ocel_id, ocel_is_initial descending, ocel_time)`.
 Object history is reconstructed by coalescing changes at one timestamp and
-forward-filling attributes per object.
+forward-filling attributes per object. A non-initial row whose named attribute
+is null is a tombstone: it resets the attribute to null and prevents its
+previous value from being carried forward.
 
 The stable change invariants are:
 
 - An object has at most one initial row.
 - An initial row has `ocel_changed_field = NULL`.
 - A non-initial row has a non-empty `ocel_changed_field`.
-- A non-initial row provides a non-null value in the named attribute column.
+- A non-initial row names a stored attribute. A null value in that attribute
+  column is an explicit tombstone.
 - The initial timestamp is not later than another change for that object.
-- At most one non-null value exists for each
-  `(ocel_id, ocel_time, attribute)`.
+- At one `(ocel_id, ocel_time, attribute)`, a tombstone cannot coexist with a
+  non-null value, and multiple non-null values cannot conflict.
 - An object without attribute history has no change rows and remains present
   in `objects`.
 
-The last rule makes same-timestamp reconstruction deterministic without a
-sequence column. Producers should coalesce compatible same-time changes into
-one logical state transition.
+The same-timestamp rules make reconstruction deterministic without a sequence
+column. Producers should coalesce compatible same-time changes into one
+logical state transition.
 
 ### Event-to-object relations
 

@@ -797,7 +797,12 @@ class OCEL:
         presence = (
             self._object_changes.filter(pl.col(s.OCEL_TYPE) == object_type)
             .select(
-                pl.col(attribute).is_not_null().any().alias(attribute)
+                (
+                    pl.col(attribute).is_not_null()
+                    | (pl.col(s.OCEL_CHANGED_FIELD) == attribute)
+                )
+                .any()
+                .alias(attribute)
                 for attribute in attributes
             )
             .collect(engine="streaming")

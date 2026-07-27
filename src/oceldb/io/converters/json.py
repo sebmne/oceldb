@@ -164,12 +164,17 @@ def _convert_objects(
                 attribute.get("time"),
                 context=f"{attribute_context}.time",
             )
-            value = attribute_value(
-                attribute.get("value"),
-                declared,
-                schema.object_attributes[name],
-                style="json",
-                context=f"{attribute_context}.value",
+            raw_value = attribute.get("value")
+            value = (
+                None
+                if raw_value is None
+                else attribute_value(
+                    raw_value,
+                    declared,
+                    schema.object_attributes[name],
+                    style="json",
+                    context=f"{attribute_context}.value",
+                )
             )
             if changed_at == EPOCH:
                 if name in initial:
@@ -238,12 +243,17 @@ def _event_attributes(
         if name in row:
             raise conversion_error(context, f"duplicate attribute value {name!r}")
         declared = _declared_attribute(declarations, name, context=context)
-        row[name] = attribute_value(
-            attribute.get("value"),
-            declared,
-            schema.event_attributes[name],
-            style="json",
-            context=f"{context}.value",
+        raw_value = attribute.get("value")
+        row[name] = (
+            None
+            if raw_value is None
+            else attribute_value(
+                raw_value,
+                declared,
+                schema.event_attributes[name],
+                style="json",
+                context=f"{context}.value",
+            )
         )
 
 

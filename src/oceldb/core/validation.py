@@ -324,29 +324,41 @@ def _change_issues(changes: pl.LazyFrame) -> list[str]:
 
     core = set(CHANGE_SCHEMA)
     attributes = [name for name in changes.collect_schema().names() if name not in core]
-    named_value = pl.lit(False)
+    known_field = pl.lit(False)
     for attribute in attributes:
-        named_value |= (pl.col(s.OCEL_CHANGED_FIELD) == attribute) & pl.col(
-            attribute
-        ).is_not_null()
-    missing_named_value = _first_row(
-        changes.filter(~pl.col(s.OCEL_IS_INITIAL) & ~named_value).select(s.OCEL_ID)
+        known_field |= pl.col(s.OCEL_CHANGED_FIELD) == attribute
+    unknown_field = _first_row(
+        changes.filter(
+            ~pl.col(s.OCEL_IS_INITIAL) & ~known_field.fill_null(False)
+        ).select(s.OCEL_ID)
     )
-    if missing_named_value is not None:
+    if unknown_field is not None:
         issues.append(
-            f"object change for {missing_named_value[s.OCEL_ID]!r} does not "
-            "provide a value for its ocel_changed_field"
+            f"object change for {unknown_field[s.OCEL_ID]!r} names an "
+            "unknown ocel_changed_field"
         )
 
     for attribute in attributes:
         conflict = _first_row(
             changes.group_by(s.OCEL_ID, s.OCEL_TIME)
-            .agg(pl.col(attribute).drop_nulls().n_unique().alias("_values"))
-            .filter(pl.col("_values") > 1)
+            .agg(
+                pl.col(attribute).drop_nulls().n_unique().alias("_values"),
+                (
+                    (pl.col(s.OCEL_CHANGED_FIELD) == attribute)
+                    & pl.col(attribute).is_null()
+                )
+                .any()
+                .alias("_tombstone"),
+                pl.col(attribute).is_not_null().any().alias("_has_value"),
+            )
+            .filter(
+                (pl.col("_values") > 1)
+                | (pl.col("_tombstone") & pl.col("_has_value"))
+            )
         )
         if conflict is not None:
             issues.append(
-                f"object {conflict[s.OCEL_ID]!r} has conflicting values for "
+                f"object {conflict[s.OCEL_ID]!r} has conflicting updates for "
                 f"{attribute!r} at one timestamp"
             )
             break

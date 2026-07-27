@@ -252,6 +252,9 @@ json_ocel = convert_json("source.jsonocel", "json.oceldb")
 xml_ocel = convert_xml("source.xmlocel", "xml.oceldb")
 ```
 
+Null timed object-attribute changes in SQLite, JSON, and XML are imported as
+tombstones, clearing the previous value from that timestamp onward.
+
 Converters write through bounded batches and install the result only after the
 complete native snapshot can be reopened. JSON and XML are parsed
 incrementally. SQLite ingestion uses vectorized Polars batches. JSON and XML

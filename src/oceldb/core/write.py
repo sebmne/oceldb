@@ -224,7 +224,7 @@ def _write_partitioned(
     """Write *frame* as one sorted Parquet file per ``ocel_type`` partition.
 
     Each partition keeps only the attribute columns that type actually has
-    at least one non-null value for.
+    at least one non-null value or explicit null tombstone for.
     """
     _validate_input_schema(frame, core_schema)
     directory.mkdir()
@@ -243,9 +243,22 @@ def _write_partitioned(
         source = pl.scan_parquet(spill)
         # One pass answers both "which types exist" and "which attribute
         # columns does each type actually carry values for".
+        is_object_changes = s.OCEL_CHANGED_FIELD in core_schema
         presence = (
             source.group_by(s.OCEL_TYPE)
-            .agg(pl.col(name).is_not_null().any() for name in attributes)
+            .agg(
+                (
+                    pl.col(name).is_not_null()
+                    | (
+                        (pl.col(s.OCEL_CHANGED_FIELD) == name)
+                        if is_object_changes
+                        else pl.lit(False)
+                    )
+                )
+                .any()
+                .alias(name)
+                for name in attributes
+            )
             .sort(s.OCEL_TYPE)
             .collect(engine="streaming")
         )
