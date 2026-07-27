@@ -352,8 +352,7 @@ def _change_issues(changes: pl.LazyFrame) -> list[str]:
                 pl.col(attribute).is_not_null().any().alias("_has_value"),
             )
             .filter(
-                (pl.col("_values") > 1)
-                | (pl.col("_tombstone") & pl.col("_has_value"))
+                (pl.col("_values") > 1) | (pl.col("_tombstone") & pl.col("_has_value"))
             )
         )
         if conflict is not None:
