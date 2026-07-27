@@ -1,6 +1,6 @@
 [project]
 name = "oceldb"
-version = "0.10.0"
+version = "0.10.1"
 description = "Polars-backed OCEL 2.0 event log access with lazy queries"
 authors = [{name = "Sebastian Menne", email = "sebastian.menne@rwth-aachen.de"}]
 license = {text = "MIT"}
@@ -79,4 +79,3 @@ reportUnknownVariableType = false
 # Package-private helpers are shared between the small filter modules.
 reportPrivateUsage = false
 reportUnusedFunction = false
-
