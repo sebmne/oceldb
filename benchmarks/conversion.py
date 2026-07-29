@@ -50,8 +50,8 @@ def run_case(
             "seconds": seconds,
             "peak_rss_bytes": _peak_rss_bytes(),
             "native_bytes": _directory_bytes(target),
-            "event_types": len(converted.event_types()),
-            "object_types": len(converted.object_types()),
+            "event_types": len(converted.event_types),
+            "object_types": len(converted.object_types),
         }
 
 

@@ -425,9 +425,9 @@ class OCEL:
         change timestamp. Sparse attribute changes are forward-filled per
         object. Type and identifier filters are applied before reconstruction.
 
-        Unlike :meth:`object_changes`, this derived accessor retains the union
-        of object attribute columns so its schema is identical for equivalent
-        in-memory and native logs.
+        When object types are specified, the result contains only attributes
+        carried by those types. This narrowing is consistent for native and
+        in-memory logs.
 
         Args:
             *types: Object types to include. If omitted, include every object
@@ -448,13 +448,18 @@ class OCEL:
         """
         from oceldb.core.states import reconstruct_object_states
 
-        changes = self._filter_relation(
-            self._object_changes,
-            (
-                (s.OCEL_TYPE, types or None),
-                (s.OCEL_ID, ids),
-            ),
-        )
+        normalized = normalize_strings(types, name="types")
+        changes = self.object_changes(*(normalized or ()), ids=ids)
+        if normalized and self._change_attributes is None:
+            attributes = list(
+                dict.fromkeys(
+                    attribute
+                    for type_name in normalized
+                    for attribute in self.object_attribute_names(type_name)
+                )
+            )
+            core = (name for name in s.CHANGE_SCHEMA if name != s.OCEL_TYPE)
+            changes = changes.select(*core, *attributes, s.OCEL_TYPE)
         return reconstruct_object_states(changes)
 
     @property
@@ -782,8 +787,28 @@ class OCEL:
         """Return an event-oriented E2O scan and its sortedness."""
         return self._e2o, self._e2o_by_event_sorted
 
-    def _object_attribute_names(self, object_type: str) -> list[str]:
-        """Return attributes carrying values for one object type."""
+    def object_attribute_names(self, object_type: str) -> list[str]:
+        """Return attribute names carrying values for one object type.
+
+        Native snapshots use partition metadata without reading row data.
+        In-memory logs determine presence from the object-change table.
+
+        Args:
+            object_type: Object type whose attributes to return.
+
+        Returns:
+            Attribute names in schema order.
+
+        Raises:
+            TypeError: If ``object_type`` is not a string.
+            ValueError: If ``object_type`` is empty or unknown.
+
+        """
+        self._require_known_type(
+            object_type,
+            known=self.object_types,
+            name="object_type",
+        )
         if self._change_attributes is not None:
             return list(self._change_attributes.get(object_type, ()))
 
@@ -811,6 +836,66 @@ class OCEL:
             return []
         row = presence.row(0, named=True)
         return [attribute for attribute in attributes if row[attribute]]
+
+    def event_attribute_names(self, event_type: str) -> list[str]:
+        """Return attribute names carrying values for one event type.
+
+        Native snapshots use partition metadata without reading row data.
+        In-memory logs determine presence from the event table.
+
+        Args:
+            event_type: Event type whose attributes to return.
+
+        Returns:
+            Attribute names in schema order.
+
+        Raises:
+            TypeError: If ``event_type`` is not a string.
+            ValueError: If ``event_type`` is empty or unknown.
+
+        """
+        self._require_known_type(
+            event_type,
+            known=self.event_types,
+            name="event_type",
+        )
+        if self._event_attributes is not None:
+            return list(self._event_attributes.get(event_type, ()))
+
+        attributes = [
+            name
+            for name in self._events.collect_schema().names()
+            if name not in s.EVENT_SCHEMA
+        ]
+        if not attributes:
+            return []
+        presence = (
+            self._events.filter(pl.col(s.OCEL_TYPE) == event_type)
+            .select(
+                pl.col(attribute).is_not_null().any().alias(attribute)
+                for attribute in attributes
+            )
+            .collect(engine="streaming")
+        )
+        if presence.is_empty():
+            return []
+        row = presence.row(0, named=True)
+        return [attribute for attribute in attributes if row[attribute]]
+
+    @staticmethod
+    def _require_known_type(
+        value: object,
+        *,
+        known: list[str],
+        name: str,
+    ) -> None:
+        """Require one non-empty known event or object type."""
+        if not isinstance(value, str):
+            raise TypeError(f"{name} must be a string.")
+        if not value:
+            raise ValueError(f"{name} must not be empty.")
+        if value not in known:
+            raise ValueError(f"Unknown {name.replace('_', ' ')} {value!r}.")
 
     @staticmethod
     def _typed(

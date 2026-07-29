@@ -371,8 +371,8 @@ def run_benchmarks(
 def query_plans(path: Path) -> dict[str, str]:
     """Return optimized plans for representative lazy workloads."""
     ocel = OCEL.open(path)
-    event_type = _first(ocel.event_types(), "event type")
-    object_type = _first(ocel.object_types(), "object type")
+    event_type = _first(ocel.event_types, "event type")
+    object_type = _first(ocel.object_types, "object type")
     selected_view = view(
         ocel,
         event_types=event_type,
@@ -389,12 +389,12 @@ def query_plans(path: Path) -> dict[str, str]:
 
 def _execute_case(path: Path, case: str) -> object:
     ocel = OCEL.open(path)
-    event_type = _first(ocel.event_types(), "event type")
-    object_type = _first(ocel.object_types(), "object type")
+    event_type = _first(ocel.event_types, "event type")
+    object_type = _first(ocel.object_types, "object type")
     if case == "open":
         return {
-            "event_types": len(ocel.event_types()),
-            "object_types": len(ocel.object_types()),
+            "event_types": len(ocel.event_types),
+            "object_types": len(ocel.object_types),
         }
     if case == "validate":
         ocel.validate()

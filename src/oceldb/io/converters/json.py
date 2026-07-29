@@ -105,10 +105,10 @@ def _convert_events(
             relation_context = f"{context}.relationships[{relation_index}]"
             relation = _object(raw_relation, relation_context)
             qualifier = relation.get("qualifier")
-            if not isinstance(qualifier, str):
+            if qualifier is not None and not isinstance(qualifier, str):
                 raise conversion_error(
                     f"{relation_context}.qualifier",
-                    "must be a string",
+                    "must be a string or null",
                 )
             relations.add_e2o(
                 event_id,
@@ -213,10 +213,10 @@ def _convert_objects(
             relation_context = f"{context}.relationships[{relation_index}]"
             relation = _object(raw_relation, relation_context)
             qualifier = relation.get("qualifier")
-            if not isinstance(qualifier, str):
+            if qualifier is not None and not isinstance(qualifier, str):
                 raise conversion_error(
                     f"{relation_context}.qualifier",
-                    "must be a string",
+                    "must be a string or null",
                 )
             relations.add_o2o(
                 object_id,

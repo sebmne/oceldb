@@ -398,6 +398,8 @@ def _convert_relations(
         source_table,
         {column: AttributeType.STRING for column in required},
     )
+    _validate_relation_identifiers(connection, source_table, required)
+    _validate_relation_endpoints(connection, source_table, target_table)
     overrides = {column: pl.String() for column in columns}
     if target_table == "e2o":
         orderings = (
@@ -428,6 +430,9 @@ def _convert_relations(
             output_table=output_table,
             query=ordered_query,
             columns=columns,
+            required_strings=tuple(
+                column for column in columns if column != s.OCEL_QUALIFIER
+            ),
             overrides=overrides,
             batch_size=batch_size,
         )
@@ -441,6 +446,7 @@ def _stage_relation_query(
     output_table: str,
     query: str,
     columns: tuple[str, ...],
+    required_strings: tuple[str, ...],
     overrides: Mapping[str, pl.DataType],
     batch_size: int,
 ) -> None:
@@ -449,10 +455,99 @@ def _stage_relation_query(
     ):
         _require_frame_strings(
             batch,
-            columns,
+            required_strings,
             context=f"{source_table} batch {batch_index}",
         )
         sink.add_sorted_frame(output_table, batch)
+
+
+def _validate_relation_identifiers(
+    connection: sqlite3.Connection,
+    table: str,
+    columns: set[str],
+) -> None:
+    for column in sorted(columns - {s.OCEL_QUALIFIER}):
+        row = connection.execute(
+            f"SELECT {_quote(column)} FROM {_quote(table)} "
+            f"WHERE typeof({_quote(column)}) != 'text' "
+            f"OR {_quote(column)} = '' LIMIT 1"
+        ).fetchone()
+        if row is None:
+            continue
+        value = "NULL" if row[0] is None else repr(row[0])
+        raise conversion_error(
+            table,
+            f"{column} must contain non-empty TEXT; found {value}",
+        )
+
+
+def _validate_relation_endpoints(
+    connection: sqlite3.Connection,
+    table: str,
+    target_table: str,
+) -> None:
+    if target_table == "e2o":
+        checks = (
+            (
+                s.OCEL_EVENT_ID,
+                "event",
+                s.OCEL_OBJECT_ID,
+                "event",
+            ),
+            (
+                s.OCEL_OBJECT_ID,
+                "object",
+                s.OCEL_EVENT_ID,
+                "object",
+            ),
+        )
+    else:
+        checks = (
+            (
+                s.OCEL_SOURCE_ID,
+                "object",
+                s.OCEL_TARGET_ID,
+                "source object",
+            ),
+            (
+                s.OCEL_TARGET_ID,
+                "object",
+                s.OCEL_SOURCE_ID,
+                "target object",
+            ),
+        )
+    for reference, master, companion, endpoint in checks:
+        join = (
+            f"FROM {_quote(table)} AS relation "
+            f"LEFT JOIN {_quote(master)} AS master "
+            f"ON relation.{_quote(reference)} = master.{_quote(s.OCEL_ID)} "
+            f"WHERE master.{_quote(s.OCEL_ID)} IS NULL"
+        )
+        counts = connection.execute(
+            f"SELECT COUNT(*), "
+            f"COUNT(DISTINCT relation.{_quote(reference)}) {join}"
+        ).fetchone()
+        assert counts is not None
+        row_count = int(counts[0])
+        if not row_count:
+            continue
+        first = connection.execute(
+            f"SELECT relation.{_quote(reference)}, "
+            f"relation.{_quote(companion)} {join} "
+            f"ORDER BY relation.{_quote(reference)}, "
+            f"relation.{_quote(companion)} LIMIT 1"
+        ).fetchone()
+        assert first is not None
+        distinct = int(counts[1])
+        rows = "row" if row_count == 1 else "rows"
+        ids = "id" if distinct == 1 else "ids"
+        verb = "references" if row_count == 1 else "reference"
+        raise conversion_error(
+            table,
+            f"{row_count} relation {rows} {verb} {distinct} unknown "
+            f"{endpoint} {ids}; first is {first[0]!r} "
+            f"({companion}={first[1]!r})",
+        )
 
 
 def _frames(
@@ -512,14 +607,24 @@ def _require_frame_strings(
     *,
     context: str,
 ) -> None:
-    invalid = pl.any_horizontal(
-        pl.col(column).is_null() | (pl.col(column).str.len_chars() == 0)
+    counts = frame.select(
+        (
+            pl.col(column).is_null()
+            | (pl.col(column).str.len_chars() == 0)
+        )
+        .sum()
+        .alias(column)
         for column in columns
-    )
-    if frame.select(invalid.any()).item():
+    ).row(0, named=True)
+    invalid = [
+        f"{column} ({count} invalid {'value' if count == 1 else 'values'})"
+        for column, count in counts.items()
+        if count
+    ]
+    if invalid:
         raise conversion_error(
             context,
-            f"columns must contain non-empty TEXT values: {list(columns)}",
+            "expected non-empty TEXT; invalid columns: " + ", ".join(invalid),
         )
 
 

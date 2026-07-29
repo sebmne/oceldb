@@ -366,7 +366,7 @@ def _relationship_target(
 def _relationship_qualifier(
     relation: ElementTree.Element,
     context: str,
-) -> str:
+) -> str | None:
     qualifier = relation.get("qualifier")
     relationship = relation.get("relationship")
     if qualifier is not None and relationship is not None and qualifier != relationship:
@@ -375,11 +375,6 @@ def _relationship_qualifier(
             "qualifier and relationship attributes disagree",
         )
     value = qualifier if qualifier is not None else relationship
-    if not isinstance(value, str):
-        raise conversion_error(
-            f"{context}.qualifier",
-            "must be a string",
-        )
     return value
 
 

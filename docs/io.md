@@ -96,6 +96,12 @@ never partially modified. `overwrite=True` only replaces another physically
 valid native snapshot and refuses unrelated files, directories, and final
 symlinks.
 
+Relation endpoints are resolved during conversion. A dangling endpoint reports
+the relation kind, number of affected rows and distinct identifiers, and the
+first missing identifier with its companion endpoint. Qualifiers are nullable;
+a missing qualifier does not make an otherwise valid E2O or O2O relation
+invalid.
+
 ## Type reconciliation
 
 OCEL exchange schemas declare attributes per event or object type. Native

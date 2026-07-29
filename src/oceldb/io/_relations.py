@@ -31,19 +31,19 @@ class RelationIndex:
                 event_id TEXT NOT NULL,
                 event_type TEXT NOT NULL,
                 object_id TEXT NOT NULL,
-                qualifier TEXT NOT NULL
+                qualifier TEXT
             );
             CREATE TABLE raw_o2o (
                 source_id TEXT NOT NULL,
                 source_type TEXT NOT NULL,
                 target_id TEXT NOT NULL,
-                qualifier TEXT NOT NULL
+                qualifier TEXT
             );
             """
         )
         self._objects: list[tuple[str, str]] = []
-        self._e2o: list[tuple[str, str, str, str]] = []
-        self._o2o: list[tuple[str, str, str, str]] = []
+        self._e2o: list[tuple[str, str, str, str | None]] = []
+        self._o2o: list[tuple[str, str, str, str | None]] = []
 
     def add_object(self, identifier: str, type_name: str) -> None:
         """Register an object identity."""
@@ -56,7 +56,7 @@ class RelationIndex:
         event_id: str,
         event_type: str,
         object_id: str,
-        qualifier: str,
+        qualifier: str | None,
     ) -> None:
         """Stage one event-to-object relation."""
         self._e2o.append((event_id, event_type, object_id, qualifier))
@@ -68,7 +68,7 @@ class RelationIndex:
         source_id: str,
         source_type: str,
         target_id: str,
-        qualifier: str,
+        qualifier: str | None,
     ) -> None:
         """Stage one object-to-object relation."""
         self._o2o.append((source_id, source_type, target_id, qualifier))
@@ -81,6 +81,7 @@ class RelationIndex:
         self._flush_e2o()
         self._flush_o2o()
         self.connection.commit()
+        self._validate_targets()
         self._resolve_e2o(
             sink,
             table="e2o",
@@ -157,6 +158,49 @@ class RelationIndex:
                     schema=s.O2O_SCHEMA,
                     strict=True,
                 ),
+            )
+
+    def _validate_targets(self) -> None:
+        for table, reference, companion, context in (
+            (
+                "raw_e2o",
+                "object_id",
+                "event_id",
+                "event-to-object relations",
+            ),
+            (
+                "raw_o2o",
+                "target_id",
+                "source_id",
+                "object-to-object relations",
+            ),
+        ):
+            join = (
+                f"FROM {table} AS relation "
+                "LEFT JOIN object_type AS object "
+                f"ON relation.{reference} = object.ocel_id "
+                "WHERE object.ocel_id IS NULL"
+            )
+            counts = self.connection.execute(
+                f"SELECT COUNT(*), COUNT(DISTINCT relation.{reference}) {join}"
+            ).fetchone()
+            assert counts is not None
+            row_count = int(counts[0])
+            if not row_count:
+                continue
+            first = self.connection.execute(
+                f"SELECT relation.{reference}, relation.{companion} {join} "
+                f"ORDER BY relation.{reference}, relation.{companion} LIMIT 1"
+            ).fetchone()
+            assert first is not None
+            distinct = int(counts[1])
+            rows = "row" if row_count == 1 else "rows"
+            ids = "id" if distinct == 1 else "ids"
+            verb = "references" if row_count == 1 else "reference"
+            raise OCELConversionError(
+                f"{context}: {row_count} relation {rows} {verb} "
+                f"{distinct} unknown object {ids}; first is {first[0]!r} "
+                f"({companion}={first[1]!r})"
             )
 
     def _flush_objects(self) -> None:

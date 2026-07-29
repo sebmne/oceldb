@@ -23,6 +23,8 @@ def flatten(
     row per case and carries the object's attribute state at the event time.
     Attributes listed in ``case_attributes`` are instead read from the
     object's initial state and emitted once per row with a ``case:`` prefix.
+    Event attribute columns are limited to event types related to the selected
+    object type.
 
     The function never guesses whether an object attribute is static. This
     keeps the output schema stable across datasets and avoids an eager
@@ -53,7 +55,7 @@ def flatten(
         >>> log = ocel >> flatten("Order", case_attributes=["customer"])
     """
     _require_object_type(ocel, object_type)
-    object_attributes = ocel._object_attribute_names(object_type)
+    object_attributes = ocel.object_attribute_names(object_type)
     selected_case_attributes = normalize_strings(
         case_attributes,
         name="case_attributes",
@@ -65,11 +67,21 @@ def flatten(
     case_attrs = [name for name in object_attributes if name in case_set]
     state_attrs = [name for name in object_attributes if name not in case_set]
 
-    event_attrs = [
-        name
-        for name in ocel.events().collect_schema().names()
-        if name not in s.EVENT_SCHEMA
-    ]
+    relation_scope = ocel.e2o(object_types=object_type)
+    related_event_types = sorted(
+        relation_scope.select(s.OCEL_EVENT_TYPE)
+        .unique()
+        .collect(engine="streaming")
+        .get_column(s.OCEL_EVENT_TYPE)
+        .to_list()
+    )
+    event_attrs = list(
+        dict.fromkeys(
+            attribute
+            for event_type in related_event_types
+            for attribute in ocel.event_attribute_names(event_type)
+        )
+    )
     output_columns = [
         "case:concept:name",
         *(f"case:{name}" for name in case_attrs),
@@ -89,14 +101,19 @@ def flatten(
         )
 
     relations = (
-        ocel.e2o(object_types=object_type)
+        relation_scope
         .select(
             pl.col(s.OCEL_OBJECT_ID).alias("case:concept:name"),
             s.OCEL_EVENT_ID,
         )
         .unique(subset=["case:concept:name", s.OCEL_EVENT_ID])
     )
-    events = ocel.events().select(
+    selected_events = (
+        ocel.events(*related_event_types)
+        if related_event_types
+        else ocel.events().filter(pl.lit(False))
+    )
+    events = selected_events.select(
         pl.col(s.OCEL_ID).alias(s.OCEL_EVENT_ID),
         pl.col(s.OCEL_TYPE).alias("concept:name"),
         pl.col(s.OCEL_TIME).alias("time:timestamp"),

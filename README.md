@@ -148,8 +148,10 @@ ocel.objects("order", ids="order-42")
 ocel.object_changes("order", ids="order-42")
 ocel.object_states("order", ids="order-42")
 
-ocel.event_types()
-ocel.object_types()
+ocel.event_types
+ocel.object_types
+ocel.event_attribute_names("Create Order")
+ocel.object_attribute_names("order")
 ```
 
 Relation accessors accept type filters first, followed by endpoint and
