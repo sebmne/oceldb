@@ -1,148 +1,318 @@
-# oceldb storage format (v1)
+# oceldb storage format
 
-This document describes the on-disk layout that oceldb uses to store OCEL 2.0 logs, explains each design decision, and discusses the trade-offs involved. It is intended for downstream library authors, contributors, and anyone who wants to read oceldb files directly without going through the Python API.
+This document is the stable physical and logical contract for native oceldb
+snapshots. Version 2 is the current format.
 
----
+An oceldb snapshot is a directory of ordinary Parquet datasets plus a small
+JSON commit marker. It is immutable: filtering or transforming a log and
+writing it creates a new complete snapshot.
 
-## Goals
+## Design goals
 
-The format is designed around one primary constraint: **DuckDB must be able to query it efficiently without materialising anything into Python first.** Everything else — compression, sorting, denormalisation — follows from that.
+1. Lazy, projection-aware scans without loading the complete log.
+2. Low memory use for both narrow queries and persistence.
+3. Direct access from Polars, DuckDB, Arrow, and other Parquet engines.
+4. Type-specific attribute schemas without a mostly-null global table.
+5. Freedom to shard large tables without changing the logical format.
 
-Secondary goals, in order of priority:
+The type-partitioned tables assume a low-to-moderate number of event and
+object types. Tens or low hundreds are expected; per-case-unique type names
+are not.
 
-1. **Readable without oceldb.** A downstream library author should be able to open any file with plain `duckdb.read_parquet(...)` and understand what they see.
-2. **Schema-stable across type evolution.** Adding a new event or object type must not require rewriting existing files.
-3. **Compact on disk.** A log with 10 M events should not cost gigabytes of storage for the format overhead alone.
-4. **Manifest-first.** All structural metadata — type names, counts, attribute names, time ranges — must be readable from a single JSON file without touching any Parquet file.
+## Version-2 layout
 
----
-
-## Directory structure
-
-```
+```text
 my-log/
   manifest.json
   events/
     ocel_type=Place%20Order/
-      data.parquet
+      part-00000.parquet
     ocel_type=Pay%20Order/
-      data.parquet
+      part-00000.parquet
   objects/
     ocel_type=order/
-      data.parquet
-    ocel_type=item/
-      data.parquet
+      part-00000.parquet
   object_changes/
     ocel_type=order/
-      data.parquet
-    ocel_type=item/
-      data.parquet
-  event_object.parquet
-  object_object.parquet
+      part-00000.parquet
+  e2o/
+    part-00000.parquet
+  o2o/
+    part-00000.parquet
+  indexes/
+    e2o_by_object/
+      part-00000.parquet
 ```
 
-Type names are URL-encoded when used as directory names (`Place Order` → `Place%20Order`). This keeps the paths unambiguous across operating systems and shells without inventing a bespoke escaping scheme. The canonical type name (with spaces, slashes, etc.) is always recoverable via URL-decoding.
+All five table directories always exist. E2O and O2O always contain at least
+one Parquet part, including when the relation is empty. A partition or table
+may contain multiple `*.parquet` parts; readers must treat the complete
+directory as one logical dataset. Writers use bounded shards and row groups;
+exchange-converter parser batches are not exposed as final Parquet fragments.
 
----
+`events`, `objects`, and `object_changes` use Hive partitions named
+`ocel_type=<URL-encoded type>`. The partition key is not stored in individual
+files; readers inject it from the path. Type names must be URL-decoded when an
+engine does not do that automatically.
 
-## Files
+## Manifest
 
-### `manifest.json`
+`manifest.json` is written last and marks a complete snapshot:
 
-The manifest is the entry point for any tool that needs to understand the log. It contains:
+```json
+{
+  "format": "oceldb",
+  "formatVersion": 2,
+  "createdAt": "2026-07-24T12:34:56Z"
+}
+```
 
-- Format version (`oceldb_format_version`), so readers can refuse to open versions they don't understand.
-- The full list of event and object types with their counts, time ranges, and attribute schemas.
-- Global totals (event count, object count, E2O count, O2O count, overall time range).
+These three fields are required. `createdAt` is a UTC snapshot-creation
+timestamp. Readers accept additional fields so optional provenance,
+checksums, or extension metadata can be introduced without changing the
+version. Unknown fields never override row data or physical schemas.
 
-Attribute schemas use Python-style type labels: `string`, `datetime`, `int`, `float`, and `bool`. The Parquet files still use the corresponding physical column types for efficient DuckDB execution.
+Snapshots produced by oceldb also declare physical indexes:
 
-Storing this in JSON rather than inside a Parquet file or a DuckDB catalog is a deliberate choice: JSON is universally readable, diff-friendly in version control, and does not require any special tooling to inspect. A tool that only needs to check "how many events are in this log" or "what attributes does the `order` type have" never needs to open a Parquet file.
+```json
+{
+  "indexes": {
+    "e2oByObject": {
+      "path": "indexes/e2o_by_object",
+      "sort": ["ocel_object_id", "ocel_event_id", "ocel_qualifier"]
+    }
+  }
+}
+```
 
-### `events/ocel_type=<type>/data.parquet`
+They also declare the physical ordering of canonical relation datasets:
 
-One file per event type. Columns:
+```json
+{
+  "relations": {
+    "e2o": {
+      "sort": ["ocel_event_id", "ocel_object_id", "ocel_qualifier"]
+    },
+    "o2o": {
+      "sort": ["ocel_source_id", "ocel_target_id", "ocel_qualifier"]
+    }
+  }
+}
+```
+
+Both declarations are optional for version-2 compatibility. A missing sort
+declaration means that a reader must not assume physical row order. Readers
+that do not understand indexes ignore them and continue to read the five
+canonical tables.
+
+The manifest does not duplicate table schemas, counts, or time ranges.
+Parquet files and their footers remain the source of truth.
+
+## Logical tables
+
+### Events
+
+Path: `events/ocel_type=<type>/*.parquet`
 
 | Column | Type |
 |---|---|
-| `ocel_id` | VARCHAR |
-| `ocel_time` | TIMESTAMP |
-| `<custom attrs>` | typed |
+| `ocel_id` | non-null string |
+| `ocel_time` | non-null timestamp (µs, UTC) |
+| `<attributes...>` | typed, nullable |
 
-The `ocel_type` column is **not stored** in the file; it is a Hive partition key supplied by the directory name. DuckDB injects it automatically when reading via glob or `hive_partitioning=true`.
+Each event type stores only attributes with at least one observed non-null
+value for that type. Declared-but-entirely-null attributes are intentionally
+not preserved. Shared attribute names must use exactly the same dtype across
+types. Attribute names must not reuse any reserved `ocel_*` core column name
+defined by `oceldb.core.schema`.
 
-**Why one file per type?** Each event type has a distinct attribute schema. A flat, wide table that unions all types would require hundreds of nullable columns on a large log, wasting both storage and I/O bandwidth on columns that are almost always NULL for any given type filter. With per-type files, a query for `Place Order` events only reads the `Place Order` file — no other columns are touched.
+Parts are sorted by `ocel_time` for Parquet row-group pruning of time
+predicates.
 
-**Sorted by `ocel_time`.** Parquet stores per-row-group min/max statistics. A time-sorted file means DuckDB can use these statistics to skip entire row groups when a query has a time predicate, turning an O(n) scan into something much closer to O(log n) for selective filters.
+### Objects
 
-### `objects/ocel_type=<type>/data.parquet`
+Path: `objects/ocel_type=<type>/*.parquet`
 
-One file per object type. Contains only `ocel_id`. The `ocel_type` comes from the Hive partition key.
+Each part contains one non-null string column, `ocel_id`, sorted by identifier.
+The identity table is authoritative even when an object has no attributes or
+relations.
 
-This table exists because some objects appear only as references in bridge tables (event-object or object-object relations) and have no attribute history at all. Without this identity table, those objects would be invisible to any query that starts from `objects()`. The file is tiny — a single VARCHAR column — and compresses to near nothing.
+### Object changes
 
-### `object_changes/ocel_type=<type>/data.parquet`
-
-One file per object type. Columns:
-
-| Column | Type | Notes |
-|---|---|---|
-| `ocel_id` | VARCHAR | |
-| `ocel_time` | TIMESTAMP | |
-| `ocel_changed_field` | VARCHAR | NULL for the synthetic initial-state row |
-| `<custom attrs>` | typed | |
-
-**Why a change log rather than a snapshot table?** OCEL 2.0 models objects as evolving entities with a change history. A snapshot table (one row per object, holding current state) would lose that history. The change-log layout preserves every historical state, which is necessary for questions like "what was the status of this order at the time of this payment event?" (answered by `object_states().as_of(t)`).
-
-**The synthetic initial-state row.** The source OCEL's initial attribute values (the non-temporal, "starting state" rows in the SQLite `object_<type>` table) are translated into change rows with `ocel_time = 1970-01-01 00:00:00` and `ocel_changed_field = NULL`. This puts the initial state into the same representation as all other changes, which means the fill-forward window function (`LAST_VALUE(attr IGNORE NULLS) OVER ...`) works uniformly without special-casing the first row. The epoch timestamp is intentionally pre-historical: it is always earlier than any real event, so it sorts first and acts as a stable anchor for the window.
-
-**Sorted by `(ocel_id, ocel_time)`.** The state-reconstruction window function partitions by `ocel_id` and orders by `ocel_time`. Pre-sorting the file ensures that rows for the same object are already contiguous and ordered, which lets DuckDB execute the window without a sort step when row groups happen to align with object boundaries on large files.
-
-### `event_object.parquet`
-
-The event-to-object relation table. Columns:
+Path: `object_changes/ocel_type=<type>/*.parquet`
 
 | Column | Type |
 |---|---|
-| `ocel_event_id` | VARCHAR |
-| `ocel_event_type` | VARCHAR |
-| `ocel_object_id` | VARCHAR |
-| `ocel_object_type` | VARCHAR |
-| `ocel_qualifier` | VARCHAR (nullable) |
+| `ocel_id` | non-null string |
+| `ocel_time` | non-null timestamp (µs, UTC) |
+| `ocel_changed_field` | nullable string |
+| `ocel_is_initial` | non-null boolean |
+| `<attributes...>` | typed, nullable |
 
-**Why denormalise the type columns?** The single most common access pattern in process mining is "find all events of type X that involve objects of type Y." Without denormalised type columns, every such query requires a join back to the event or object tables to filter by type. With denormalisation, the filter runs directly against this flat table — no join needed. The storage overhead is small because Parquet uses dictionary encoding by default for low-cardinality VARCHAR columns; the type strings are stored once in a dictionary and referenced by integer indices in each row.
+Parts are sorted by `(ocel_id, ocel_is_initial descending, ocel_time)`.
+Object history is reconstructed by coalescing changes at one timestamp and
+forward-filling attributes per object. A non-initial row whose named attribute
+is null is a tombstone: it resets the attribute to null and prevents its
+previous value from being carried forward.
 
-**Sorted by `(ocel_object_id, ocel_event_id)`.** The dominant access direction is "all events for object X", which corresponds to filtering by `ocel_object_id`. This sort order collocates rows for the same object, making those queries faster on large logs.
+The stable change invariants are:
 
-### `object_object.parquet`
+- An object has at most one initial row.
+- An initial row has `ocel_changed_field = NULL`.
+- A non-initial row has a non-empty `ocel_changed_field`.
+- A non-initial row names a stored attribute. A null value in that attribute
+  column is an explicit tombstone.
+- The initial timestamp is not later than another change for that object.
+- At one `(ocel_id, ocel_time, attribute)`, a tombstone cannot coexist with a
+  non-null value, and multiple non-null values cannot conflict.
+- An object without attribute history has no change rows and remains present
+  in `objects`.
 
-The object-to-object relation table. Same rationale as `event_object.parquet` for denormalisation. Only written if the source log contains at least one O2O relation; the view generator skips registering the view when the file is absent.
+The same-timestamp rules make reconstruction deterministic without a sequence
+column. Producers should coalesce compatible same-time changes into one
+logical state transition.
 
----
+### Event-to-object relations
 
-## Compression and encoding
+Path: `e2o/**/*.parquet`
 
-All Parquet files are written with ZSTD compression. ZSTD was chosen over Snappy (less compression) and GZIP (slower decompression) as a reasonable middle ground between ratio and read/write speed.
+| Column | Type |
+|---|---|
+| `ocel_event_id` | non-null string |
+| `ocel_event_type` | non-null string |
+| `ocel_object_id` | non-null string |
+| `ocel_object_type` | non-null string |
+| `ocel_qualifier` | nullable string |
 
-Parquet's built-in dictionary encoding handles low-cardinality string columns (type names, qualifiers, status values) automatically. No manual encoding hints are needed.
+Event and object types are denormalized to support type filtering without
+joining entity tables. Relation row order is not part of the format. The
+directory form permits future sharding or physical partitioning while
+preserving this logical schema.
 
----
+oceldb writers physically sort canonical E2O rows by
+`(ocel_event_id, ocel_object_id, ocel_qualifier)`. Individual files contain
+consecutive ranges of that ordering. The ordering is a performance property,
+not part of the logical relation semantics.
 
-## What is not in v1
+### Object-to-object relations
 
-The following were considered and deferred:
+Path: `o2o/**/*.parquet`
 
-- **Sub-partitioning by time** (`type+time` layout). Partitioning events by both type and year/month would further speed up time-range queries on very large logs. This is reserved as a future `layout` value in the manifest. v1 readers must refuse to open a `layout` they do not recognise.
-- **Append mode.** Writing new events or objects into an existing directory is not supported. All writes produce a complete, self-contained directory.
-- **External Parquet row groups.** Splitting `data.parquet` per type into multiple files (e.g., one per year) for parallel writes is not in scope. The current single-file-per-type layout is simple and already benefits from DuckDB's parallel reader.
-- **Non-Parquet backends.** The format is intentionally Parquet-only. CSV and JSON variants were not considered; they offer no meaningful advantage over Parquet for analytical workloads and complicate schema handling.
+| Column | Type |
+|---|---|
+| `ocel_source_id` | non-null string |
+| `ocel_source_type` | non-null string |
+| `ocel_target_id` | non-null string |
+| `ocel_target_type` | non-null string |
+| `ocel_qualifier` | nullable string |
 
----
+Relation row order is not part of the format.
 
-## Versioning and forward compatibility
+oceldb writers physically sort O2O rows by
+`(ocel_source_id, ocel_target_id, ocel_qualifier)`.
 
-The `oceldb_format_version` field in the manifest is a string, not a number, to leave room for non-linear version histories (e.g., `"1.1"` for a backwards-compatible addition). The current version is `"1"`.
+### Object-oriented E2O index
 
-A reader that encounters an unknown version must raise `UnsupportedFormatVersionError` rather than silently misreading the files. This is a hard requirement: a format change that rearranges columns or renames files would produce wrong results, not errors, if readers silently continued.
+Path: `indexes/e2o_by_object/*.parquet`
 
-Downstream library authors who access `ocel.con` (the raw Ibis/DuckDB backend) or `ocel.manifest` directly should treat the column names in `oceldb.schema` as the stable contract. Those constants will not be renamed within a format version.
+The optional object-oriented index contains exactly the canonical E2O rows
+with the canonical E2O schema, physically sorted by
+`(ocel_object_id, ocel_event_id, ocel_qualifier)`. It is committed
+transactionally with the canonical tables. Object-oriented accessors and
+exact distinct-event counts use this representation; event-oriented queries
+continue to use `e2o/`.
+
+Keeping the index outside `e2o/` ensures that generic recursive scans of the
+canonical relation never see duplicate logical rows.
+
+## Global logical invariants
+
+- Event identifiers are unique.
+- Object identifiers are unique.
+- Every object change references an existing object with the same type.
+- Every E2O endpoint references an existing event/object with the same
+  denormalized type.
+- Every O2O endpoint references an existing object with the same denormalized
+  type.
+- Required identifiers and type names are non-empty.
+- Core column dtypes match the canonical schemas exactly.
+
+`OCEL.open(path)` validates the manifest and physical schemas without reading
+row data. `OCEL.open(path, validate=True)` and `ocel.validate()` additionally
+execute the global logical checks.
+
+## Physical conventions
+
+- ZSTD compression for committed parts.
+- Bounded relation shards of at most 250,000 rows.
+- Parquet row groups of at most 50,000 rows for relation datasets.
+- UTC-normalized microsecond timestamps.
+- String identifiers, types, and qualifiers.
+- Strict shared attribute dtypes; no implicit widening during open.
+- Attribute presence is based on observed non-null values.
+- Type partition names use the canonical URL encoding produced by the writer.
+- The complete directory is staged beside the target and installed by rename.
+- A writer reopens and physically validates staged output before installation.
+- `overwrite=True` only replaces a physically valid native snapshot. A final
+  symlink or unrelated existing path is rejected.
+
+Installation is transactional at the process-error boundary: failures before
+installation leave the existing target untouched, and a failed replacement
+attempt restores its backup when the target is still free. The format assumes
+a single writer per target path. A process or machine crash during the short
+directory-swap window can leave an adjacent hidden `.backup-*` directory that
+contains the previous complete snapshot; readers never treat staging or backup
+directories as committed snapshots.
+
+## Reading without oceldb
+
+```python
+import polars as pl
+
+events = pl.scan_parquet(
+    "my-log/events/ocel_type=*/*.parquet",
+    hive_partitioning=True,
+)
+objects = pl.scan_parquet(
+    "my-log/objects/ocel_type=*/*.parquet",
+    hive_partitioning=True,
+)
+changes = pl.scan_parquet(
+    "my-log/object_changes/ocel_type=*/*.parquet",
+    hive_partitioning=True,
+)
+e2o = pl.scan_parquet("my-log/e2o/**/*.parquet")
+o2o = pl.scan_parquet("my-log/o2o/**/*.parquet")
+```
+
+Different type partitions can have different attribute columns, so generic
+readers may need an explicit union schema or a missing-column option.
+
+```sql
+SELECT *
+FROM read_parquet(
+  'my-log/events/ocel_type=*/*.parquet',
+  hive_partitioning = true,
+  union_by_name = true
+);
+
+SELECT * FROM read_parquet('my-log/e2o/**/*.parquet');
+```
+
+The optional index is independently readable when an object-oriented physical
+order is useful:
+
+```sql
+SELECT *
+FROM read_parquet('my-log/indexes/e2o_by_object/**/*.parquet');
+```
+
+## Deliberately deferred
+
+- Physical E2O/O2O type partitioning.
+- Append or in-place mutation.
+- Checksums and file inventories.
+- A target-oriented O2O index.
+
+These can be added behind the dataset-directory abstraction after workload
+benchmarks justify them.

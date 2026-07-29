@@ -1,26 +1,35 @@
 [project]
 name = "oceldb"
-version = "0.9.1"
-description = "DuckDB-backed OCEL 2.0 analysis with typed lazy queries"
+version = "0.10.1"
+description = "Polars-backed OCEL 2.0 event log access with lazy queries"
 authors = [{name = "Sebastian Menne", email = "sebastian.menne@rwth-aachen.de"}]
 license = {text = "MIT"}
 readme = "README.md"
 requires-python = ">=3.11"
 dependencies = [
-    "duckdb>=1.5.1",
-    "graphviz>=0.21",
-    "ibis-framework>=12.0.0",
-    "networkx>=3.6.1",
+    "defusedxml>=0.7.1",
+    "ijson>=3.4.0",
     "polars>=1.35.2",
+]
+
+[project.optional-dependencies]
+sql = [
+    "duckdb>=1.5.1",
     "pyarrow>=24.0.0",
-    "pyarrow-hotfix>=0.7",
 ]
 
 [dependency-groups]
+benchmark = [
+    "pm4py==2.7.22",
+    "r4pm[polars]==0.5.5",
+]
 dev = [
     "basedpyright>=1.31.0",
-    "ipykernel>=7.2.0",
-    "pytest>=9.0.3",
+    "duckdb>=1.5.1",
+    "ipykernel>=7.3.0",
+    "mypy>=2.3.0",
+    "pyarrow>=24.0.0",
+    "pytest>=9.1.1",
     "ruff>=0.15.10",
 ]
 
@@ -42,17 +51,15 @@ include = [
     "/LICENSE",
     "/README.md",
     "/docs",
-    "/examples",
     "/pyproject.toml",
     "/src",
-    "/tests",
 ]
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/oceldb"]
 
 [tool.pytest.ini_options]
-pythonpath = ["src", "tests"]
+pythonpath = [".", "src", "tests"]
 testpaths = ["tests"]
 
 [tool.basedpyright]
@@ -62,3 +69,13 @@ extraPaths = ["src"]
 pythonVersion = "3.11"
 typeCheckingMode = "strict"
 reportMissingTypeStubs = false
+# Polars intentionally accepts broad expression inputs, which surface as
+# Unknown in its public annotations under strict mode. Keep strict checking for
+# concrete types while suppressing those third-party boundary diagnostics.
+reportUnknownArgumentType = false
+reportUnknownLambdaType = false
+reportUnknownMemberType = false
+reportUnknownVariableType = false
+# Package-private helpers are shared between the small filter modules.
+reportPrivateUsage = false
+reportUnusedFunction = false
