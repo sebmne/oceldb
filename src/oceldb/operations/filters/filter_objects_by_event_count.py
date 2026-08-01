@@ -3,6 +3,7 @@
 import polars as pl
 
 from oceldb.core import schema as s
+from oceldb.core.query import filter_relation
 from oceldb.ocel import OCEL
 from oceldb.operations.filters._utils import (
     Mode,
@@ -56,8 +57,8 @@ def filter_objects_by_event_count(
     """
     in_bounds = within_bounds(min_count=min_count, max_count=max_count)
     event_scope = normalize_strings(event_types, name="event_types", non_empty=True)
-    e2o, sorted_pairs = ocel._e2o_object_oriented()
-    e2o = OCEL._filter_relation(
+    e2o = ocel.e2o()
+    e2o = filter_relation(
         e2o,
         ((s.OCEL_EVENT_TYPE, event_scope),),
     )
@@ -65,7 +66,6 @@ def filter_objects_by_event_count(
         e2o,
         group=s.OCEL_OBJECT_ID,
         value=s.OCEL_EVENT_ID,
-        sorted_pairs=sorted_pairs,
     )
     object_counts = (
         ocel.objects()

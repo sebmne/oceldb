@@ -66,7 +66,7 @@ Converters never build the complete OCEL as Python objects:
 - JSON and XML relation endpoint types are resolved through a temporary
   disk-backed index rather than an in-memory object dictionary.
 - Parser parts are compacted into bounded, sorted native shards.
-- Event- and object-oriented E2O representations are built during conversion.
+- Each logical relation table is emitted once.
 - The completed native snapshot is physically reopened before atomic
   installation.
 

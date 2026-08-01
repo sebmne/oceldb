@@ -82,40 +82,25 @@ class RelationIndex:
         self._flush_o2o()
         self.connection.commit()
         self._validate_targets()
-        self._resolve_e2o(
-            sink,
-            table="e2o",
-            order_by="r.event_id, r.object_id, r.qualifier",
-        )
-        self._resolve_e2o(
-            sink,
-            table="e2o_by_object",
-            order_by="r.object_id, r.event_id, r.qualifier",
-        )
+        self._resolve_e2o(sink)
         self._resolve_o2o(sink)
 
     def close(self) -> None:
         """Close the temporary relation index."""
         self.connection.close()
 
-    def _resolve_e2o(
-        self,
-        sink: TableSink,
-        *,
-        table: str,
-        order_by: str,
-    ) -> None:
+    def _resolve_e2o(self, sink: TableSink) -> None:
         cursor = self.connection.execute(
-            f"""
+            """
             SELECT r.event_id, r.event_type, r.object_id, o.ocel_type, r.qualifier
             FROM raw_e2o AS r
             LEFT JOIN object_type AS o ON r.object_id = o.ocel_id
-            ORDER BY {order_by}
+            ORDER BY r.event_id, r.object_id, r.qualifier
             """
         )
         while rows := cursor.fetchmany(self.batch_size):
             sink.add_sorted_frame(
-                table,
+                "e2o",
                 pl.from_dicts(
                     [
                         {

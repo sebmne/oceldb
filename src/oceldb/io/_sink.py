@@ -15,7 +15,7 @@ from oceldb.core import schema as s
 from oceldb.core.write import (
     _ROWS_PER_GROUP,
     _write_manifest,
-    _write_relation_index,
+    _write_relation_dataset,
     install_staged_native,
 )
 from oceldb.io._schema import ExchangeSchema
@@ -42,7 +42,6 @@ class TableSink:
             "objects": s.OBJECT_SCHEMA,
             "object_changes": schema.change_schema,
             "e2o": s.E2O_SCHEMA,
-            "e2o_by_object": s.E2O_SCHEMA,
             "o2o": s.O2O_SCHEMA,
         }
         self._buffers: dict[str, list[dict[str, Any]]] = {
@@ -94,8 +93,6 @@ class TableSink:
         """Flush staged rows, write a native snapshot, and open it."""
         for table in ("events", "objects", "object_changes", "e2o", "o2o"):
             self._flush(table, write_empty=True)
-        if self._parts["e2o_by_object"] or self._buffers["e2o_by_object"]:
-            self._flush("e2o_by_object")
         native = self.root.parent / "native"
         native.mkdir()
         self._partition_table(
@@ -237,33 +234,15 @@ class TableSink:
 
     def _finalize_relations(self, native: Path) -> None:
         e2o = pl.scan_parquet(sorted((self.root / "e2o").glob("*.parquet")))
-        _write_relation_index(
+        _write_relation_dataset(
             e2o,
             native / "e2o",
             s.E2O_SCHEMA,
             sort_by=(s.OCEL_EVENT_ID, s.OCEL_OBJECT_ID, s.OCEL_QUALIFIER),
             input_sorted="e2o" in self._sorted_tables,
         )
-        if self._parts["e2o_by_object"]:
-            e2o_by_object = pl.scan_parquet(
-                sorted((self.root / "e2o_by_object").glob("*.parquet"))
-            )
-            _write_relation_index(
-                e2o_by_object,
-                native / "indexes" / "e2o_by_object",
-                s.E2O_SCHEMA,
-                sort_by=(s.OCEL_OBJECT_ID, s.OCEL_EVENT_ID, s.OCEL_QUALIFIER),
-                input_sorted="e2o_by_object" in self._sorted_tables,
-            )
-        else:
-            _write_relation_index(
-                e2o,
-                native / "indexes" / "e2o_by_object",
-                s.E2O_SCHEMA,
-                sort_by=(s.OCEL_OBJECT_ID, s.OCEL_EVENT_ID, s.OCEL_QUALIFIER),
-            )
         o2o = pl.scan_parquet(sorted((self.root / "o2o").glob("*.parquet")))
-        _write_relation_index(
+        _write_relation_dataset(
             o2o,
             native / "o2o",
             s.O2O_SCHEMA,

@@ -101,12 +101,6 @@ def write_native(
             O2O_SCHEMA,
             sort_by=(s.OCEL_SOURCE_ID, s.OCEL_TARGET_ID, s.OCEL_QUALIFIER),
         )
-        _write_relation_index(
-            pl.scan_parquet(sorted((staging / "e2o").glob("*.parquet"))),
-            staging / "indexes" / "e2o_by_object",
-            E2O_SCHEMA,
-            sort_by=(s.OCEL_OBJECT_ID, s.OCEL_EVENT_ID, s.OCEL_QUALIFIER),
-        )
         _write_manifest(staging)
         install_staged_native(staging, target, overwrite=overwrite)
     except BaseException:
@@ -290,7 +284,7 @@ def _write_relation(
 ) -> None:
     """Write a sorted, bounded-shard relation dataset."""
     _validate_input_schema(frame, schema, allow_attributes=False)
-    _write_relation_index(
+    _write_relation_dataset(
         frame.select(*schema),
         directory,
         schema,
@@ -298,16 +292,15 @@ def _write_relation(
     )
 
 
-def _write_relation_index(
+def _write_relation_dataset(
     frame: pl.LazyFrame,
     directory: Path,
     schema: dict[str, pl.DataType],
     *,
     sort_by: tuple[str, ...],
-    descending: tuple[bool, ...] | None = None,
     input_sorted: bool = False,
 ) -> None:
-    """Sort and shard one canonical or secondary relation representation."""
+    """Sort and shard one canonical relation dataset."""
     directory.mkdir(parents=True)
     destination = pl.PartitionBy(
         directory,
@@ -315,10 +308,7 @@ def _write_relation_index(
     )
     source = frame.select(*schema)
     if not input_sorted:
-        source = source.sort(
-            *sort_by,
-            descending=descending or False,
-        )
+        source = source.sort(*sort_by)
     source.sink_parquet(
         destination,
         compression="zstd",
@@ -418,10 +408,10 @@ def _require_native_snapshot(target: Path) -> None:
 
 
 def _write_manifest(directory: Path) -> None:
-    """Write the version-2 commit-marker manifest into *directory*."""
+    """Write the version-2.1 commit-marker manifest into *directory*."""
     document: dict[str, object] = {
         "format": "oceldb",
-        "formatVersion": 2,
+        "formatVersion": 2.1,
         "createdAt": datetime.now(timezone.utc)
         .isoformat(timespec="seconds")
         .replace("+00:00", "Z"),
@@ -442,17 +432,6 @@ def _write_manifest(directory: Path) -> None:
             },
         },
     }
-    if (directory / "indexes" / "e2o_by_object").is_dir():
-        document["indexes"] = {
-            "e2oByObject": {
-                "path": "indexes/e2o_by_object",
-                "sort": [
-                    s.OCEL_OBJECT_ID,
-                    s.OCEL_EVENT_ID,
-                    s.OCEL_QUALIFIER,
-                ],
-            }
-        }
     (directory / "manifest.json").write_text(
         json.dumps(document, indent=2) + "\n", encoding="utf-8"
     )

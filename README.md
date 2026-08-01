@@ -5,8 +5,8 @@ event logs.
 
 oceldb exposes an object-centric event log as five lazy
 [Polars](https://pola.rs/) tables and stores it as an immutable,
-type-partitioned Parquet snapshot. Queries load only the columns, type
-partitions, and relation ranges they need.
+type-partitioned Parquet snapshot. Table access builds projection-aware lazy
+queries, and typed entity queries prune unrelated partitions.
 
 The project focuses on three properties:
 
@@ -15,7 +15,7 @@ The project focuses on three properties:
 - a portable native format that remains readable without oceldb.
 
 > oceldb is currently pre-1.0. The public `OCEL` API and native format version
-> 2 are the stability boundaries; exchange conversion and operations remain
+> 2.1 are the stability boundaries; exchange conversion and operations remain
 > areas of active optimization.
 
 ## Features
@@ -26,8 +26,7 @@ The project focuses on three properties:
 - Immutable filtering, views, projection, and classical flattening.
 - Direct OCEL 2.0 SQLite, JSON, and XML conversion.
 - Type-partitioned Parquet with per-type attribute schemas.
-- Event- and object-oriented E2O storage for efficient traversal in both
-  directions.
+- Sorted, bounded Parquet shards for E2O and O2O relations.
 - Transactional snapshot installation and guarded replacement.
 - Optional DuckDB SQL over all five logical tables.
 - Public type information, including a `py.typed` marker.
@@ -179,10 +178,6 @@ A selector accepts one string or an iterable of strings. `None` means
 unrestricted. Required selectors reject empty input, while an empty optional
 identifier iterable produces an empty result.
 
-Native E2O access automatically chooses the event- or object-oriented physical
-representation. This is transparent to callers and does not change the
-logical relation schema.
-
 ## Operations
 
 The operations package contains lazy, immutable filters and transformations:
@@ -290,16 +285,11 @@ orders.oceldb/
     part-00000.parquet
   o2o/
     part-00000.parquet
-  indexes/
-    e2o_by_object/
-      part-00000.parquet
 ```
 
 Events, objects, and object changes are partitioned by URL-encoded
 `ocel_type`. Individual type partitions store only attributes that carry a
-value for that type. E2O and O2O use sorted, bounded Parquet shards. The
-secondary E2O representation stores the same logical rows in object-oriented
-order.
+value for that type. E2O and O2O use sorted, bounded Parquet shards.
 
 The format uses standard Parquet and can be queried directly:
 
@@ -319,7 +309,7 @@ does not replace unrelated paths or follow a final symlink. Copying an
 unchanged native handle reuses its committed Parquet files without decoding
 and re-encoding them.
 
-The complete format version 2 contract is documented in
+The complete format version 2.1 contract is documented in
 [docs/storage-format.md](docs/storage-format.md).
 
 ## Validation and errors

@@ -89,21 +89,12 @@ def distinct_counts(
     *,
     group: str,
     value: str,
-    sorted_pairs: bool,
 ) -> pl.LazyFrame:
-    """Count exact distinct endpoint pairs with a sorted streaming fast path."""
-    pairs = relations.select(group, value)
-    if not sorted_pairs:
-        return pairs.group_by(group).agg(pl.col(value).n_unique().alias("_count"))
-    new_pair = (
-        (pl.col(group) != pl.col(group).shift(1))
-        | (pl.col(value) != pl.col(value).shift(1))
-    ).fill_null(True)
+    """Count distinct relation endpoints per group."""
     return (
-        pairs.filter(new_pair)
-        .set_sorted(group)
-        .group_by(group, maintain_order=True)
-        .len(name="_count")
+        relations.select(group, value)
+        .group_by(group)
+        .agg(pl.col(value).n_unique().alias("_count"))
     )
 
 

@@ -402,40 +402,35 @@ def _convert_relations(
     _validate_relation_endpoints(connection, source_table, target_table)
     overrides = {column: pl.String() for column in columns}
     if target_table == "e2o":
-        orderings = (
-            (
-                "e2o",
-                (s.OCEL_EVENT_ID, s.OCEL_OBJECT_ID, s.OCEL_QUALIFIER),
-            ),
-            (
-                "e2o_by_object",
-                (s.OCEL_OBJECT_ID, s.OCEL_EVENT_ID, s.OCEL_QUALIFIER),
-            ),
+        output_table = "e2o"
+        ordering = (
+            s.OCEL_EVENT_ID,
+            s.OCEL_OBJECT_ID,
+            s.OCEL_QUALIFIER,
         )
     else:
-        orderings = (
-            (
-                "o2o",
-                (s.OCEL_SOURCE_ID, s.OCEL_TARGET_ID, s.OCEL_QUALIFIER),
-            ),
+        output_table = "o2o"
+        ordering = (
+            s.OCEL_SOURCE_ID,
+            s.OCEL_TARGET_ID,
+            s.OCEL_QUALIFIER,
         )
-    for output_table, ordering in orderings:
-        ordered_query = (
-            query + " ORDER BY " + ", ".join(_quote(column) for column in ordering)
-        )
-        _stage_relation_query(
-            connection,
-            sink,
-            source_table=source_table,
-            output_table=output_table,
-            query=ordered_query,
-            columns=columns,
-            required_strings=tuple(
-                column for column in columns if column != s.OCEL_QUALIFIER
-            ),
-            overrides=overrides,
-            batch_size=batch_size,
-        )
+    ordered_query = (
+        query + " ORDER BY " + ", ".join(_quote(column) for column in ordering)
+    )
+    _stage_relation_query(
+        connection,
+        sink,
+        source_table=source_table,
+        output_table=output_table,
+        query=ordered_query,
+        columns=columns,
+        required_strings=tuple(
+            column for column in columns if column != s.OCEL_QUALIFIER
+        ),
+        overrides=overrides,
+        batch_size=batch_size,
+    )
 
 
 def _stage_relation_query(

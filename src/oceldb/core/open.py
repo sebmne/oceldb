@@ -56,7 +56,7 @@ def open_native(path: PathLikeStr) -> OCEL:
     base = Path(path).expanduser().resolve()
     if not base.is_dir():
         raise FileNotFoundError(f"Native OCEL directory not found: {base}")
-    format_version, indexes, relations = _validate_manifest(base)
+    format_version, relations = _validate_manifest(base)
 
     events, event_attributes, event_types = _scan_partitioned(
         base / "events", EVENT_SCHEMA
@@ -75,23 +75,14 @@ def open_native(path: PathLikeStr) -> OCEL:
         O2O_SCHEMA,
         sorted_by=(s.OCEL_SOURCE_ID if "o2o" in relations else None),
     )
-    e2o_by_object = None
-    if "e2oByObject" in indexes:
-        e2o_by_object = _scan_relation_dataset(
-            base / "indexes" / "e2o_by_object",
-            E2O_SCHEMA,
-            sorted_by=s.OCEL_OBJECT_ID,
-        )
     return OCEL(
         events=events,
         objects=objects,
         object_changes=object_changes,
         e2o=e2o,
-        _e2o_by_object=e2o_by_object,
-        _e2o_by_event_sorted="e2o" in relations,
         o2o=o2o,
         event_attributes=event_attributes,
-        change_attributes=change_attributes,
+        object_attributes=change_attributes,
         _event_types=event_types,
         _object_types=object_types,
         _source=base,
@@ -99,10 +90,8 @@ def open_native(path: PathLikeStr) -> OCEL:
     )
 
 
-def _validate_manifest(
-    base: Path,
-) -> tuple[int, dict[str, object], dict[str, object]]:
-    """Validate the manifest and return its version and known indexes."""
+def _validate_manifest(base: Path) -> tuple[float, dict[str, object]]:
+    """Validate the manifest and return its version and relation metadata."""
     path = base / "manifest.json"
     try:
         value = json.loads(path.read_text(encoding="utf-8"))
@@ -115,8 +104,10 @@ def _validate_manifest(
     required = {"format", "formatVersion", "createdAt"}
     if missing := sorted(required - set(value)):
         raise OCELFormatError(f"Native OCEL manifest is missing fields: {missing}")
+    if "indexes" in value or (base / "indexes").exists():
+        raise OCELFormatError("Native OCEL secondary indexes are not supported")
     version = value.get("formatVersion")
-    if value.get("format") != "oceldb" or version != 2:
+    if value.get("format") != "oceldb" or version != 2.1:
         raise OCELFormatError("Unsupported native OCEL format or version")
     created_at = value.get("createdAt")
     if not isinstance(created_at, str) or not created_at.endswith("Z"):
@@ -127,19 +118,6 @@ def _validate_manifest(
         raise OCELFormatError("Native OCEL createdAt must be a UTC timestamp") from exc
     if timestamp.utcoffset() != timedelta(0):
         raise OCELFormatError("Native OCEL createdAt must be a UTC timestamp")
-    indexes = value.get("indexes", {})
-    if not isinstance(indexes, dict):
-        raise OCELFormatError("Native OCEL indexes must be an object")
-    e2o_by_object = indexes.get("e2oByObject")
-    if e2o_by_object is not None and e2o_by_object != {
-        "path": "indexes/e2o_by_object",
-        "sort": [
-            s.OCEL_OBJECT_ID,
-            s.OCEL_EVENT_ID,
-            s.OCEL_QUALIFIER,
-        ],
-    }:
-        raise OCELFormatError("Native OCEL e2oByObject index declaration is invalid")
     relations = value.get("relations", {})
     expected_relations = {
         "e2o": {
@@ -168,8 +146,8 @@ def _validate_manifest(
         raise OCELFormatError(
             f"Native OCEL declares unknown relation metadata: {unknown_relations}"
         )
-    assert isinstance(version, int)
-    return version, indexes, relations
+    assert isinstance(version, float)
+    return version, relations
 
 
 def _scan_partitioned(

@@ -1,7 +1,7 @@
 # oceldb storage format
 
 This document is the stable physical and logical contract for native oceldb
-snapshots. Version 2 is the current format.
+snapshots. Version 2.1 is the current format.
 
 An oceldb snapshot is a directory of ordinary Parquet datasets plus a small
 JSON commit marker. It is immutable: filtering or transforming a log and
@@ -19,7 +19,7 @@ The type-partitioned tables assume a low-to-moderate number of event and
 object types. Tens or low hundreds are expected; per-case-unique type names
 are not.
 
-## Version-2 layout
+## Version-2.1 layout
 
 ```text
 my-log/
@@ -39,9 +39,6 @@ my-log/
     part-00000.parquet
   o2o/
     part-00000.parquet
-  indexes/
-    e2o_by_object/
-      part-00000.parquet
 ```
 
 All five table directories always exist. E2O and O2O always contain at least
@@ -62,7 +59,7 @@ engine does not do that automatically.
 ```json
 {
   "format": "oceldb",
-  "formatVersion": 2,
+  "formatVersion": 2.1,
   "createdAt": "2026-07-24T12:34:56Z"
 }
 ```
@@ -72,20 +69,8 @@ timestamp. Readers accept additional fields so optional provenance,
 checksums, or extension metadata can be introduced without changing the
 version. Unknown fields never override row data or physical schemas.
 
-Snapshots produced by oceldb also declare physical indexes:
-
-```json
-{
-  "indexes": {
-    "e2oByObject": {
-      "path": "indexes/e2o_by_object",
-      "sort": ["ocel_object_id", "ocel_event_id", "ocel_qualifier"]
-    }
-  }
-}
-```
-
-They also declare the physical ordering of canonical relation datasets:
+Snapshots produced by oceldb also declare the physical ordering of canonical
+relation datasets:
 
 ```json
 {
@@ -100,10 +85,9 @@ They also declare the physical ordering of canonical relation datasets:
 }
 ```
 
-Both declarations are optional for version-2 compatibility. A missing sort
-declaration means that a reader must not assume physical row order. Readers
-that do not understand indexes ignore them and continue to read the five
-canonical tables.
+The relation-ordering declarations are optional for version-2.1 compatibility.
+A missing sort declaration means that a reader must not assume physical row
+order.
 
 The manifest does not duplicate table schemas, counts, or time ranges.
 Parquet files and their footers remain the source of truth.
@@ -211,20 +195,6 @@ Relation row order is not part of the format.
 oceldb writers physically sort O2O rows by
 `(ocel_source_id, ocel_target_id, ocel_qualifier)`.
 
-### Object-oriented E2O index
-
-Path: `indexes/e2o_by_object/*.parquet`
-
-The optional object-oriented index contains exactly the canonical E2O rows
-with the canonical E2O schema, physically sorted by
-`(ocel_object_id, ocel_event_id, ocel_qualifier)`. It is committed
-transactionally with the canonical tables. Object-oriented accessors and
-exact distinct-event counts use this representation; event-oriented queries
-continue to use `e2o/`.
-
-Keeping the index outside `e2o/` ensures that generic recursive scans of the
-canonical relation never see duplicate logical rows.
-
 ## Global logical invariants
 
 - Event identifiers are unique.
@@ -299,20 +269,11 @@ FROM read_parquet(
 SELECT * FROM read_parquet('my-log/e2o/**/*.parquet');
 ```
 
-The optional index is independently readable when an object-oriented physical
-order is useful:
-
-```sql
-SELECT *
-FROM read_parquet('my-log/indexes/e2o_by_object/**/*.parquet');
-```
-
 ## Deliberately deferred
 
 - Physical E2O/O2O type partitioning.
 - Append or in-place mutation.
 - Checksums and file inventories.
-- A target-oriented O2O index.
 
 These can be added behind the dataset-directory abstraction after workload
 benchmarks justify them.

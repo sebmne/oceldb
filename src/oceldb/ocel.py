@@ -6,8 +6,15 @@ from typing import TypeVar
 import polars as pl
 
 from oceldb.core import schema as s
+from oceldb.core.frames import as_lazy, concat_table
+from oceldb.core.query import (
+    distinct_types,
+    filter_identifier,
+    filter_relation,
+    require_known_type,
+    select_types,
+)
 from oceldb.core.sql import execute_sql
-from oceldb.errors import OCELValidationError
 from oceldb.types import FrameLike, OneOrMany, PathLikeStr, normalize_strings
 
 _T = TypeVar("_T")
@@ -23,8 +30,7 @@ class OCEL:
 
     Native snapshots retain partition metadata. Consequently, type-filtered
     event and object-change queries can prune files and omit attribute columns
-    that do not belong to the requested types. Relation access automatically
-    selects the event- or object-oriented physical representation.
+    that do not belong to the requested types.
 
     Attributes:
         source: Absolute path of the native snapshot, or ``None`` when the log
@@ -44,11 +50,9 @@ class OCEL:
         "_objects",
         "_object_changes",
         "_e2o",
-        "_e2o_by_object",
-        "_e2o_by_event_sorted",
         "_o2o",
         "_event_attributes",
-        "_change_attributes",
+        "_object_attributes",
         "_event_types",
         "_object_types",
         "_source",
@@ -63,14 +67,12 @@ class OCEL:
         object_changes: pl.LazyFrame,
         e2o: pl.LazyFrame,
         o2o: pl.LazyFrame,
-        _e2o_by_object: pl.LazyFrame | None = None,
-        _e2o_by_event_sorted: bool = False,
         event_attributes: dict[str, list[str]] | None = None,
-        change_attributes: dict[str, list[str]] | None = None,
+        object_attributes: dict[str, list[str]] | None = None,
         _event_types: tuple[str, ...] | None = None,
         _object_types: tuple[str, ...] | None = None,
         _source: Path | None = None,
-        _format_version: int | None = None,
+        _format_version: float | None = None,
     ) -> None:
         """Initialize an OCEL from trusted lazy frames.
 
@@ -84,13 +86,9 @@ class OCEL:
                 canonical object-change schema.
             e2o: Event-to-object relations in the canonical E2O schema.
             o2o: Object-to-object relations in the canonical O2O schema.
-            _e2o_by_object: Optional native E2O index sorted by object and
-                event identifier.
-            _e2o_by_event_sorted: Whether canonical E2O rows carry the
-                declared event-oriented physical order.
             event_attributes: Event attribute columns by event type. ``None``
                 indicates that column-narrowing metadata is unavailable.
-            change_attributes: Object attribute columns by object type.
+            object_attributes: Object attribute columns by object type.
                 ``None`` indicates that column-narrowing metadata is
                 unavailable.
             _event_types: Event types obtained from native partition metadata.
@@ -104,14 +102,12 @@ class OCEL:
         self._objects = objects
         self._object_changes = object_changes
         self._e2o = e2o
-        self._e2o_by_object = _e2o_by_object
-        self._e2o_by_event_sorted = _e2o_by_event_sorted
         self._o2o = o2o
         # ``open()`` derives these maps from partition Parquet footers.
         # ``None`` means narrowing is unknown, so typed accessors fall back to
         # plain type filters.
         self._event_attributes = event_attributes
-        self._change_attributes = change_attributes
+        self._object_attributes = object_attributes
         self._event_types = _event_types
         self._object_types = _object_types
         self._source = _source
@@ -128,7 +124,7 @@ class OCEL:
         return self._source
 
     @property
-    def format_version(self) -> int | None:
+    def format_version(self) -> float | None:
         """Return the native storage-format version.
 
         Returns:
@@ -189,13 +185,11 @@ class OCEL:
 
         """
         frames = {
-            "events": cls._as_lazy(events),
-            "objects": cls._as_lazy(objects),
-            "object_changes": cls._as_lazy(object_changes),
-            "e2o": cls._as_lazy(e2o),
-            "o2o": (
-                pl.LazyFrame(schema=s.O2O_SCHEMA) if o2o is None else cls._as_lazy(o2o)
-            ),
+            "events": as_lazy(events),
+            "objects": as_lazy(objects),
+            "object_changes": as_lazy(object_changes),
+            "e2o": as_lazy(e2o),
+            "o2o": (pl.LazyFrame(schema=s.O2O_SCHEMA) if o2o is None else as_lazy(o2o)),
         }
         from oceldb.core.validation import validate_schemas
 
@@ -268,13 +262,13 @@ class OCEL:
 
         """
         additions = {
-            "events": None if events is None else self._as_lazy(events),
-            "objects": None if objects is None else self._as_lazy(objects),
+            "events": None if events is None else as_lazy(events),
+            "objects": None if objects is None else as_lazy(objects),
             "object_changes": (
-                None if object_changes is None else self._as_lazy(object_changes)
+                None if object_changes is None else as_lazy(object_changes)
             ),
-            "e2o": None if e2o is None else self._as_lazy(e2o),
-            "o2o": None if o2o is None else self._as_lazy(o2o),
+            "e2o": None if e2o is None else as_lazy(e2o),
+            "o2o": None if o2o is None else as_lazy(o2o),
         }
         provided = {
             name: frame for name, frame in additions.items() if frame is not None
@@ -296,27 +290,27 @@ class OCEL:
         validate_table_schemas(provided)
 
         return OCEL.from_frames(
-            events=self._concat_table(
+            events=concat_table(
                 self._events,
                 additions["events"],
                 allow_attributes=True,
             ),
-            objects=self._concat_table(
+            objects=concat_table(
                 self._objects,
                 additions["objects"],
                 schema=s.OBJECT_SCHEMA,
             ),
-            object_changes=self._concat_table(
+            object_changes=concat_table(
                 self._object_changes,
                 additions["object_changes"],
                 allow_attributes=True,
             ),
-            e2o=self._concat_table(
+            e2o=concat_table(
                 self._e2o,
                 additions["e2o"],
                 schema=s.E2O_SCHEMA,
             ),
-            o2o=self._concat_table(
+            o2o=concat_table(
                 self._o2o,
                 additions["o2o"],
                 schema=s.O2O_SCHEMA,
@@ -348,13 +342,13 @@ class OCEL:
             ValueError: If a selector contains an empty string.
 
         """
-        selected = self._typed(
+        selected = select_types(
             self._events,
             types,
             s.EVENT_SCHEMA,
             self._event_attributes,
         )
-        return self._filter_identifier(selected, s.OCEL_ID, ids)
+        return filter_identifier(selected, s.OCEL_ID, ids)
 
     def objects(self, *types: str, ids: OneOrMany[str] | None = None) -> pl.LazyFrame:
         """Build a lazy query over object identities.
@@ -379,8 +373,8 @@ class OCEL:
             ValueError: If a selector contains an empty string.
 
         """
-        selected = self._typed(self._objects, types, s.OBJECT_SCHEMA, None)
-        return self._filter_identifier(selected, s.OCEL_ID, ids)
+        selected = select_types(self._objects, types, s.OBJECT_SCHEMA, None)
+        return filter_identifier(selected, s.OCEL_ID, ids)
 
     def object_changes(
         self, *types: str, ids: OneOrMany[str] | None = None
@@ -408,13 +402,13 @@ class OCEL:
             ValueError: If a selector contains an empty string.
 
         """
-        selected = self._typed(
+        selected = select_types(
             self._object_changes,
             types,
             s.CHANGE_SCHEMA,
-            self._change_attributes,
+            self._object_attributes,
         )
-        return self._filter_identifier(selected, s.OCEL_ID, ids)
+        return filter_identifier(selected, s.OCEL_ID, ids)
 
     def object_states(
         self, *types: str, ids: OneOrMany[str] | None = None
@@ -450,7 +444,7 @@ class OCEL:
 
         normalized = normalize_strings(types, name="types")
         changes = self.object_changes(*(normalized or ()), ids=ids)
-        if normalized and self._change_attributes is None:
+        if normalized and self._object_attributes is None:
             attributes = list(
                 dict.fromkeys(
                     attribute
@@ -478,7 +472,7 @@ class OCEL:
         """
         if self._event_types is not None:
             return list(self._event_types)
-        return self._distinct_types(self._events)
+        return distinct_types(self._events)
 
     @property
     def object_types(self) -> list[str]:
@@ -496,7 +490,7 @@ class OCEL:
         """
         if self._object_types is not None:
             return list(self._object_types)
-        return self._distinct_types(self._objects)
+        return distinct_types(self._objects)
 
     def e2o(
         self,
@@ -523,9 +517,7 @@ class OCEL:
 
         Returns:
             A lazy frame in the canonical E2O schema containing only matching
-            relations. Native snapshots choose the object-oriented physical
-            index when only object-side selectors are supplied; logical row
-            contents and ordering guarantees are unchanged.
+            relations.
 
         Raises:
             TypeError: If a selector is neither a string nor an iterable of
@@ -533,16 +525,8 @@ class OCEL:
             ValueError: If a selector contains an empty string.
 
         """
-        frame = self._e2o
-        if (
-            self._e2o_by_object is not None
-            and event_types is None
-            and event is None
-            and (object_types is not None or object is not None)
-        ):
-            frame = self._e2o_by_object
-        return self._filter_relation(
-            frame,
+        return filter_relation(
+            self._e2o,
             (
                 (s.OCEL_EVENT_TYPE, event_types),
                 (s.OCEL_OBJECT_TYPE, object_types),
@@ -585,7 +569,7 @@ class OCEL:
             ValueError: If a selector contains an empty string.
 
         """
-        return self._filter_relation(
+        return filter_relation(
             self._o2o,
             (
                 (s.OCEL_SOURCE_TYPE, source_types),
@@ -770,22 +754,10 @@ class OCEL:
                 self._object_changes if object_changes is None else object_changes
             ),
             e2o=self._e2o if e2o is None else e2o,
-            _e2o_by_object=self._e2o_by_object if e2o is None else None,
-            _e2o_by_event_sorted=(self._e2o_by_event_sorted if e2o is None else False),
             o2o=self._o2o if o2o is None else o2o,
             event_attributes=self._event_attributes,
-            change_attributes=self._change_attributes,
+            object_attributes=self._object_attributes,
         )
-
-    def _e2o_object_oriented(self) -> tuple[pl.LazyFrame, bool]:
-        """Return an object-oriented E2O scan and its sortedness."""
-        if self._e2o_by_object is not None:
-            return self._e2o_by_object, True
-        return self._e2o, False
-
-    def _e2o_event_oriented(self) -> tuple[pl.LazyFrame, bool]:
-        """Return an event-oriented E2O scan and its sortedness."""
-        return self._e2o, self._e2o_by_event_sorted
 
     def object_attribute_names(self, object_type: str) -> list[str]:
         """Return attribute names carrying values for one object type.
@@ -804,13 +776,13 @@ class OCEL:
             ValueError: If ``object_type`` is empty or unknown.
 
         """
-        self._require_known_type(
+        require_known_type(
             object_type,
             known=self.object_types,
             name="object_type",
         )
-        if self._change_attributes is not None:
-            return list(self._change_attributes.get(object_type, ()))
+        if self._object_attributes is not None:
+            return list(self._object_attributes.get(object_type, ()))
 
         attributes = [
             name
@@ -854,7 +826,7 @@ class OCEL:
             ValueError: If ``event_type`` is empty or unknown.
 
         """
-        self._require_known_type(
+        require_known_type(
             event_type,
             known=self.event_types,
             name="event_type",
@@ -881,126 +853,3 @@ class OCEL:
             return []
         row = presence.row(0, named=True)
         return [attribute for attribute in attributes if row[attribute]]
-
-    @staticmethod
-    def _require_known_type(
-        value: object,
-        *,
-        known: list[str],
-        name: str,
-    ) -> None:
-        """Require one non-empty known event or object type."""
-        if not isinstance(value, str):
-            raise TypeError(f"{name} must be a string.")
-        if not value:
-            raise ValueError(f"{name} must not be empty.")
-        if value not in known:
-            raise ValueError(f"Unknown {name.replace('_', ' ')} {value!r}.")
-
-    @staticmethod
-    def _typed(
-        frame: pl.LazyFrame,
-        types: tuple[str, ...],
-        schema: dict[str, pl.DataType],
-        attributes: dict[str, list[str]] | None,
-    ) -> pl.LazyFrame:
-        """Apply a type filter and, when known, narrow attribute columns.
-
-        Args:
-            frame: Table to filter.
-            types: Type names to include.
-            schema: Canonical schema whose columns must remain in the result.
-            attributes: Attribute columns by type, or ``None`` when unknown.
-
-        Returns:
-            The original lazy frame when ``types`` is empty; otherwise, a
-            filtered lazy frame.
-
-        """
-        normalized = normalize_strings(types, name="types")
-        if not normalized:
-            return frame
-        selected = frame.filter(pl.col(s.OCEL_TYPE).is_in(normalized))
-        if attributes is None:
-            return selected
-        core = (name for name in schema if name != s.OCEL_TYPE)
-        kept = list(
-            dict.fromkeys(
-                name
-                for type_name in normalized
-                for name in attributes.get(type_name, ())
-            )
-        )
-        return selected.select(*core, *kept, s.OCEL_TYPE)
-
-    @staticmethod
-    def _filter_relation(
-        frame: pl.LazyFrame,
-        filters: tuple[tuple[str, OneOrMany[str] | None], ...],
-    ) -> pl.LazyFrame:
-        """Apply scalar-or-membership predicates without evaluating rows."""
-        result = frame
-        for column, value in filters:
-            values = normalize_strings(value, name=f"{column} filter")
-            if values is None:
-                continue
-            predicate = (
-                pl.col(column) == values[0]
-                if len(values) == 1
-                else pl.col(column).is_in(values)
-            )
-            result = result.filter(predicate)
-        return result
-
-    @staticmethod
-    def _filter_identifier(
-        frame: pl.LazyFrame,
-        column: str,
-        values: OneOrMany[str] | None,
-    ) -> pl.LazyFrame:
-        """Apply an identifier selector without evaluating rows."""
-        return OCEL._filter_relation(frame, ((column, values),))
-
-    @staticmethod
-    def _distinct_types(frame: pl.LazyFrame) -> list[str]:
-        """Collect distinct, non-empty type names using streaming execution."""
-        values = (
-            frame.select(s.OCEL_TYPE)
-            .unique()
-            .sort(s.OCEL_TYPE)
-            .collect(engine="streaming")
-            .get_column(s.OCEL_TYPE)
-            .to_list()
-        )
-        if not all(isinstance(value, str) and value for value in values):
-            raise OCELValidationError(
-                "Invalid OCEL: type names must be non-null, non-empty strings."
-            )
-        return values
-
-    @staticmethod
-    def _concat_table(
-        current: pl.LazyFrame,
-        addition: pl.LazyFrame | None,
-        *,
-        allow_attributes: bool = False,
-        schema: dict[str, pl.DataType] | None = None,
-    ) -> pl.LazyFrame:
-        """Concatenate a validated table addition without evaluating rows."""
-        if addition is None:
-            return current
-        if allow_attributes:
-            return pl.concat((current, addition), how="diagonal")
-        assert schema is not None
-        columns = tuple(schema)
-        return pl.concat(
-            (current.select(*columns), addition.select(*columns)),
-            how="vertical",
-        )
-
-    @staticmethod
-    def _as_lazy(frame: FrameLike) -> pl.LazyFrame:
-        """Convert an eager frame to lazy form without evaluating a lazy input."""
-        if isinstance(frame, pl.DataFrame):
-            return frame.lazy()
-        return frame
