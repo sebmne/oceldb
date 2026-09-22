@@ -536,6 +536,87 @@ class OCEL:
             ),
         )
 
+    def e2o_events(
+        self,
+        *,
+        event_types: OneOrMany[str] | None = None,
+        object_types: OneOrMany[str] | None = None,
+        event: OneOrMany[str] | None = None,
+        object: OneOrMany[str] | None = None,
+        qualifier: OneOrMany[str] | None = None,
+    ) -> pl.LazyFrame:
+        """Build a lazy E2O query enriched with event data.
+
+        The result contains one row per matching event-to-object relation.
+        Event timestamps and attributes are joined from :meth:`events`, while
+        the relation-oriented ``ocel_event_id`` and ``ocel_event_type`` names
+        are retained. Duplicate ``ocel_id`` and ``ocel_type`` columns are not
+        included.
+
+        Every supplied filter is applied with logical AND and has the same
+        semantics as in :meth:`e2o`.
+
+        Args:
+            event_types: Event type or event types to include.
+            object_types: Object type or object types to include.
+            event: Event identifier or identifiers to include.
+            object: Object identifier or identifiers to include.
+            qualifier: Relation qualifier or qualifiers to include.
+
+        Returns:
+            A lazy frame containing ``ocel_event_id``, ``ocel_event_type``,
+            ``ocel_time``, event attributes, ``ocel_object_id``,
+            ``ocel_object_type``, and ``ocel_qualifier``.
+
+        Raises:
+            TypeError: If a selector is neither a string nor an iterable of
+                strings.
+            ValueError: If a selector contains an empty string.
+
+        """
+        selected_event_types = normalize_strings(
+            event_types,
+            name=f"{s.OCEL_EVENT_TYPE} filter",
+        )
+        selected_event_ids = normalize_strings(
+            event,
+            name=f"{s.OCEL_EVENT_ID} filter",
+        )
+        relations = self.e2o(
+            event_types=selected_event_types,
+            object_types=object_types,
+            event=selected_event_ids,
+            object=object,
+            qualifier=qualifier,
+        )
+        events = self.events(
+            *(selected_event_types or ()),
+            ids=selected_event_ids,
+        )
+        attributes = [
+            name
+            for name in events.collect_schema().names()
+            if name not in s.EVENT_SCHEMA
+        ]
+        event_details = events.select(
+            pl.col(s.OCEL_ID).alias(s.OCEL_EVENT_ID),
+            s.OCEL_TIME,
+            *attributes,
+        )
+        return relations.join(
+            event_details,
+            on=s.OCEL_EVENT_ID,
+            how="inner",
+        ).select(
+            s.OCEL_EVENT_ID,
+            s.OCEL_EVENT_TYPE,
+            s.OCEL_TIME,
+            *attributes,
+            s.OCEL_OBJECT_ID,
+            s.OCEL_OBJECT_TYPE,
+            s.OCEL_QUALIFIER,
+        )
+
     def o2o(
         self,
         *,

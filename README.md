@@ -121,6 +121,7 @@ An OCEL consists of five logical tables:
 | `objects()` | Authoritative object identity and type |
 | `object_changes()` | Initial object states and sparse attribute changes |
 | `e2o()` | Qualified event-to-object relations |
+| `e2o_events()` | Event-to-object relations enriched with event data |
 | `o2o()` | Qualified object-to-object relations |
 
 Object attributes live in `object_changes()`. Use `object_states()` when a
@@ -163,6 +164,11 @@ relations = ocel.e2o(
     event=["e1", "e2"],
     object="order-42",
     qualifier="order",
+)
+
+enriched_relations = ocel.e2o_events(
+    event_types="Pay Order",
+    object_types="order",
 )
 
 links = ocel.o2o(
